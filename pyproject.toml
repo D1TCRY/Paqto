@@ -1,0 +1,49 @@
+[project]
+name = "paqto"
+version = "0.1.0"
+description = "An async-first Python library for building transport-agnostic communication systems between computers."
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENCE"]
+authors = [
+    { name = "Cecchelani Diego", email = "ceccdieg@gmail.com" },
+]
+keywords = [
+    "asyncio",
+    "communication",
+    "networking",
+    "peer-to-peer",
+    "transport",
+]
+dependencies = []
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications",
+    "Topic :: Internet",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Homepage = "https://github.com/ceccdieg/paqto"
+
+
+[build-system]
+requires = ["setuptools>=77.0.3", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["paqto*"]
+namespaces = false
