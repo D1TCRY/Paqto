@@ -33,7 +33,7 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ceccdieg/paqto"
+Homepage = "https://github.com/D1TCRY/Paqto"
 
 
 [build-system]
