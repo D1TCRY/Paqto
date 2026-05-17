@@ -35,6 +35,11 @@ classifiers = [
 [project.urls]
 Homepage = "https://github.com/D1TCRY/Paqto"
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+]
 
 [build-system]
 requires = ["setuptools>=77.0.3", "wheel"]
@@ -47,3 +52,8 @@ package-dir = { "" = "src" }
 where = ["src"]
 include = ["paqto*"]
 namespaces = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "strict"
