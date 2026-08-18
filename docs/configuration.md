@@ -20,7 +20,7 @@ indefinitely.
 | --- | ---: | --- |
 | `connect_timeout` | `10.0` | Default outgoing transport-connect deadline. `None` permits an unbounded adapter connect. |
 | `send_timeout` | `10.0` | Default wait for an outbound frame writer. It does not prove remote receipt and expiry does not prove the frame was unsent. |
-| `discover_timeout` | `3.0` | Node discovery budget; accepts `None` or a finite value greater than or equal to zero. `LanDiscovery` uses a small guard inside the budget. |
+| `discover_timeout` | `3.0` | Node discovery budget; accepts `None` or a finite value greater than or equal to zero. Zero requests an immediate service pass without an `asyncio.wait_for(..., 0)` wrapper. `LanDiscovery` uses a small guard inside positive budgets. |
 | `handshake_timeout` | `10.0` | Paqto hello exchange deadline. `None` removes the protocol-handshake bound; this is separate from TLS handshake time. |
 | `request_timeout` | `10.0` | Default correlated reply wait. `None` waits until completion, cancellation, disconnect, or shutdown. |
 | `acknowledgement_timeout` | `10.0` | Default technical ACK wait. `None` can leave a wait pending until connection loss or shutdown. |
@@ -89,9 +89,11 @@ reattaches an old request/ACK Future.
 | Option | Default | Purpose and implications |
 | --- | ---: | --- |
 | `host` | `"0.0.0.0"` | Listener bind host. Asyncio validates usable host values when the listener starts. Use an explicit interface when address advertisement matters. |
+| `advertised_host` | `None` | Explicit host published in the listener endpoint. When omitted, a wildcard bind uses best-effort local hostname resolution for the same address family, then the wildcard itself. Set this on multi-homed, sandboxed, or DNS-limited hosts. |
 | `port` | `0` | Listener port; `0` requests an OS-assigned port. Asyncio validates it at start. |
 | `max_frame_size` | `16 * 1024 * 1024 + 1` | Complete TCP-frame payload limit, positive integer up to `2**32 - 1`. Include Paqto's one-byte kind marker above the application limit. |
 | `tls` | `None` | `TlsConfig` enables TLS; `None` is unauthenticated plain TCP. |
+| `tls_contexts` | `None` | Advanced `TlsContextConfig` with caller-prepared client/server contexts. Mutually exclusive with `tls`; supplying both raises `ValueError`. |
 | `max_pending_accepts` | `128` | Positive integer cap on established connections waiting for `accept()`. This is before node admission. |
 | `frame_payload_timeout` | `30.0` | Finite positive seconds to complete a payload after its length is declared, or `None` for no deadline. Do not disable on hostile networks. |
 
@@ -109,8 +111,10 @@ reattaches an old request/ACK Future.
 | `peer_ttl` | `60.0` | Finite positive cache TTL or `None`. Separate from `PaqtoConfig.peer_ttl`. |
 | `max_discovered_peers` | `1024` | Positive integer cache-admission bound; existing entries may refresh at capacity. |
 
-`default_discover_timeout=0` is valid and useful in deterministic tests. The
-node-level `discover_timeout` is passed to the service and also wraps it.
+`default_discover_timeout=0` is valid and useful for a non-blocking cache pass.
+The node-level `discover_timeout` is passed to the service; positive/`None`
+budgets retain their normal deadline behavior, while zero delegates directly so
+an immediate result is not cancelled before execution.
 
 ## `TlsConfig`
 
@@ -119,6 +123,7 @@ node-level `discover_timeout` is passed to the service and also wraps it.
 | `certfile` | required | Non-empty string or path-like certificate-chain file. Loaded when the transport starts. Never use repository test fixtures in deployment. |
 | `keyfile` | required | Non-empty string or path-like private key. Paqto has no key-password callback or key-storage manager. |
 | `cafile` | `None` | Optional trust-root file. `None` uses system roots for the relevant client/server purpose. |
+| `cadata` | `None` | Optional in-memory PEM string or DER certificate bytes. Combined with `cafile` when both are present; no temporary file is created. |
 | `verify_peer` | `True` | Boolean controlling outgoing certificate verification. Disabling it makes outgoing peer authentication false. |
 | `check_hostname` | `True` | Boolean controlling outgoing hostname/IP verification. Cannot be true when `verify_peer` is false. |
 | `require_client_certificate` | `False` | Boolean. When true, incoming TLS requires and verifies a client certificate (mTLS). |
@@ -128,12 +133,26 @@ node-level `discover_timeout` is passed to the service and also wraps it.
 TLS always sets a minimum version of TLS 1.2. See [Security](security.md) for
 identity-binding requirements and residual risks.
 
+## `TlsContextConfig`
+
+`TlsContextConfig` is the advanced, filesystem-independent configuration mode.
+It requires a caller-prepared `client_context` and `server_context`, both
+`ssl.SSLContext` instances, and optionally accepts the same generic
+`peer_identity_resolver` and a finite positive `handshake_timeout`.
+
+The contexts remain caller-owned and Paqto uses them unchanged. Their
+`verify_mode` and `check_hostname` settings define certificate and hostname
+verification. `LanTransport(tls_contexts=...)` cannot be combined with
+`LanTransport(tls=...)`; there is no precedence rule or silent merge.
+
 ## Mutability and deployment consistency
 
 `PaqtoConfig` is mutable, but changing it while a node runs does not rebuild
 already-created queues, workers, handshakes, or sessions. Treat configuration as
-startup state. `ReconnectPolicy`, `TlsConfig`, `SecurityInfo`, and
-`ProtocolSession` are immutable snapshots.
+startup state. `ReconnectPolicy`, `TlsConfig`, `TlsContextConfig`,
+`SecurityInfo`, and `ProtocolSession` are immutable snapshots. The SSL context
+objects referenced by `TlsContextConfig` remain mutable caller-owned objects;
+configure them fully before starting a transport.
 
 Peers must agree on protocol version and serializer id. Transport frame limits
 must accommodate the negotiated application limit plus protocol overhead.

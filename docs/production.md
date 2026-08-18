@@ -85,7 +85,8 @@ not count application-created tasks blocked outside queues.
 
 Built-in shutdown is tested under load, but the abstract adapter contracts
 cannot force a third-party `close()` or `stop()` that never returns. There are
-no adapter-close deadlines or hard cancellation-resilient shutdown guarantee.
+no adapter-close deadlines. Caller cancellation does not abandon Paqto's stop
+sequence, but a non-cooperative adapter can still prevent it from finishing.
 
 ### Serializer safety
 
@@ -96,9 +97,11 @@ chosen encoding.
 
 ### Certificate lifecycle
 
-TLS configuration loads file-based material at transport start. Paqto does not
-manage encrypted-key password callbacks, hot reload, issuance, rotation,
-revocation, pinning, secure storage, or expiry alerts.
+High-level TLS configuration loads file-based certificate/key material at
+transport start; trust roots may also come from in-memory CA data. Advanced
+configuration accepts caller-prepared contexts. Paqto does not manage
+encrypted-key password callbacks, hot reload, issuance, rotation, revocation,
+pinning, secure storage, or expiry alerts.
 
 ### Authorization remains an application concern
 
@@ -143,4 +146,5 @@ available Windows/Python 3.14 environment. A production claim still needs:
   certificate lifecycle.
 
 See [Security](security.md), [Reliability](reliability.md), and
-[Messaging](messaging.md) for the exact current contracts.
+[Messaging](messaging.md) for the exact current contracts. The capability and
+host-environment boundary is defined in [Platform support](platform-support.md).

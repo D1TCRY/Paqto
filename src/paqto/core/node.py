@@ -18,7 +18,7 @@ from paqto.core.config import (
 )
 from paqto.core.connection import Connection, ConnectionState
 from paqto.core.discovered import DiscoveredPeer
-from paqto.core.discovery import DiscoveryService
+from paqto.core.discovery import DiscoveryService, NoDiscovery
 from paqto.core.endpoint import Endpoint
 from paqto.core.errors import (
     AcknowledgementError,
@@ -145,7 +145,9 @@ class PaqtoNode:
     Args:
         name: Human-readable name placed on the local :class:`Peer`.
         transport: Adapter used for outgoing and incoming frame connections.
-        discovery: Service used to announce and find reachable peers.
+        discovery: Service used to announce and find reachable peers. Omit or
+            pass ``None`` to create no discovery sockets and use explicitly
+            provisioned :class:`DiscoveredPeer` endpoints.
         serializer: Application envelope serializer shared with remote peers.
         config: Runtime options; omitted to use :class:`PaqtoConfig` defaults.
         peer_id: Stable local logical id, or ``None`` to generate one.
@@ -156,14 +158,14 @@ class PaqtoNode:
         *,
         name: str,
         transport: Transport,
-        discovery: DiscoveryService,
+        discovery: DiscoveryService | None = None,
         serializer: Serializer,
         config: PaqtoConfig | None = None,
         peer_id: str | None = None,
     ) -> None:
         self.peer = Peer(id=peer_id or uuid4().hex, name=name)
         self.transport = transport
-        self.discovery = discovery
+        self.discovery = discovery if discovery is not None else NoDiscovery()
         self.serializer = serializer
         self.config = config or PaqtoConfig()
 
@@ -197,6 +199,7 @@ class PaqtoNode:
         )
         self._known_peers: dict[str, DiscoveredPeer] = {}
         self._running = False
+        self._lifecycle_generation = 0
         self._lifecycle_lock = asyncio.Lock()
 
     @property
@@ -266,176 +269,279 @@ class PaqtoNode:
         """Start transport, listener, discovery, and node-owned workers.
 
         Partial startup is rolled back. Calling this while already running
-        raises :class:`AlreadyStartedError`; a stopped node may start again if
-        its adapters support restart.
+        raises :class:`AlreadyStartedError`. A completed ``stop()`` invalidates
+        cached reachability, and the same node may then start again if its
+        adapters support restart.
         """
         async with self._lifecycle_lock:
-            if self._running:
-                raise AlreadyStartedError("PaqtoNode is already running.")
-
-            listener: Listener | None = None
-            transport_attempted = False
-            discovery_attempted = False
-            try:
-                transport_attempted = True
-                await self.transport.start()
-                listener = await self.transport.create_listener()
-                await listener.start()
-                discovery_attempted = True
-                await self.discovery.start(self.peer, [listener.local_endpoint])
-            except BaseException:
-                cleanup: list[Awaitable[Any]] = []
-                if discovery_attempted:
-                    cleanup.append(self.discovery.stop())
-                if listener is not None:
-                    cleanup.append(listener.close())
-                if transport_attempted:
-                    cleanup.append(self.transport.stop())
-                if cleanup:
-                    await asyncio.gather(*cleanup, return_exceptions=True)
-                self._listener = None
-                raise
-
-            self._listener = listener
-            self._running = True
-            self._inbound_queue = asyncio.Queue(maxsize=self.config.max_inbound_queue)
-            self._event_queue = asyncio.Queue(maxsize=self.config.max_event_queue)
-            for index in range(self.config.handler_concurrency):
-                self._start_dispatch_worker(str(index))
-            self._event_task = asyncio.create_task(
-                self._event_worker(),
-                name=f"paqto-events-{self.peer.id}",
-            )
-            self._accept_task = asyncio.create_task(
-                self._accept_loop(),
-                name=f"paqto-accept-{self.peer.id}",
-            )
+            await self._start_locked()
 
     async def stop(self) -> None:
         """Stop the node and discard all volatile session and correlation state.
 
         The method is idempotent when already stopped. It attempts every cleanup
         stage and then raises the first non-cancellation cleanup failure, if any.
-        Custom adapters must cooperate with cancellation and return from their
-        close methods.
+        Once entered, cleanup continues even if the calling task is cancelled;
+        cancellation is re-raised after resources have been released. Custom
+        adapters must cooperate with cancellation and return from close methods.
         """
-        async with self._lifecycle_lock:
-            if not self._running:
-                return
+        caller = asyncio.current_task()
+        task = asyncio.create_task(
+            self._stop_serialized(skip_task=caller),
+            name=f"paqto-stop-{self.peer.id}",
+        )
+        await self._await_lifecycle_task(task)
 
-            self._running = False
-            self._fail_all_pending("PaqtoNode stopped before the operation completed.")
-            self._fail_all_heartbeats()
-            current_task = asyncio.current_task()
-            accept_task = self._accept_task
-            if accept_task is not None:
-                accept_task.cancel()
+    async def network_changed(self) -> list[DiscoveredPeer]:
+        """Rebuild network resources after a host-observed environment change.
 
-            reader_tasks = [
-                task for task in self._reader_tasks.values() if task is not current_task
-            ]
-            for task in reader_tasks:
-                task.cancel()
-            handler_tasks = [
-                task for task in self._handler_tasks if task is not current_task
-            ]
-            for task in handler_tasks:
-                task.cancel()
-            heartbeat_tasks = [
-                task
-                for task in self._heartbeat_tasks.values()
-                if task is not current_task
-            ]
-            reconnect_tasks = [
-                task
-                for task in self._reconnect_tasks.values()
-                if task is not current_task
-            ]
-            outbound_tasks = [
-                channel.task
-                for channel in self._outbound_channels.values()
-                if channel.task is not current_task
-            ]
-            event_task = self._event_task
-            for task in [
-                *heartbeat_tasks,
-                *reconnect_tasks,
-                *outbound_tasks,
-            ]:
-                task.cancel()
-            if event_task is not None and event_task is not current_task:
-                event_task.cancel()
+        The host decides when a network change occurred. Paqto atomically stops
+        sessions, invalidates cached remote endpoints, creates a fresh listener,
+        republishes its new endpoint through discovery, and performs one new
+        discovery pass. Previously connected peers found again are scheduled
+        through the configured reconnect policy. With reconnect disabled, the
+        returned observations can be connected explicitly by the host.
 
-            self._fail_all_outbound(
-                ConnectionClosedError(
-                    "PaqtoNode stopped before the frame could be sent."
-                )
-            )
+        The operation requires a running node. Cancellation is reported only
+        after the refresh has reached a consistent running or stopped state.
+        """
+        self._ensure_running()
+        caller = asyncio.current_task()
+        task = asyncio.create_task(
+            self._network_changed_serialized(skip_task=caller),
+            name=f"paqto-network-changed-{self.peer.id}",
+        )
+        return await self._await_lifecycle_task(task)
 
-            listener = self._listener
-            self._listener = None
-            physical_connections = list(
-                self._incoming_connections | self._outgoing_connections
-            )
-            self._incoming_connections.clear()
-            self._outgoing_connections.clear()
-            self._sessions.clear()
-            self._session_connections.clear()
-            self._session_directions.clear()
-            self._peer_connections.clear()
-            self._last_received_activity.clear()
+    async def _start_locked(self) -> None:
+        """Start all owned resources while the lifecycle lock is held."""
+        if self._running:
+            raise AlreadyStartedError("PaqtoNode is already running.")
 
-            cleanup: list[Awaitable[Any]] = [
-                *(connection.close() for connection in physical_connections),
-                self._connections.close_all(),
-            ]
+        listener: Listener | None = None
+        transport_attempted = False
+        discovery_attempted = False
+        try:
+            transport_attempted = True
+            await self.transport.start()
+            listener = await self.transport.create_listener()
+            await listener.start()
+            discovery_attempted = True
+            await self.discovery.start(self.peer, [listener.local_endpoint])
+        except BaseException:
+            cleanup: list[Awaitable[Any]] = []
+            if discovery_attempted:
+                cleanup.append(self.discovery.stop())
             if listener is not None:
                 cleanup.append(listener.close())
-            cleanup_results = await asyncio.gather(
-                *cleanup,
-                return_exceptions=True,
+            if transport_attempted:
+                cleanup.append(self.transport.stop())
+            if cleanup:
+                await asyncio.gather(*cleanup, return_exceptions=True)
+            self._listener = None
+            raise
+
+        self._listener = listener
+        self._running = True
+        self._lifecycle_generation += 1
+        self._inbound_queue = asyncio.Queue(maxsize=self.config.max_inbound_queue)
+        self._event_queue = asyncio.Queue(maxsize=self.config.max_event_queue)
+        for index in range(self.config.handler_concurrency):
+            self._start_dispatch_worker(str(index))
+        self._event_task = asyncio.create_task(
+            self._event_worker(),
+            name=f"paqto-events-{self.peer.id}",
+        )
+        self._accept_task = asyncio.create_task(
+            self._accept_loop(),
+            name=f"paqto-accept-{self.peer.id}",
+        )
+
+    async def _stop_serialized(
+        self,
+        *,
+        skip_task: asyncio.Task[Any] | None,
+    ) -> None:
+        async with self._lifecycle_lock:
+            await self._stop_locked(skip_task=skip_task)
+
+    async def _stop_locked(
+        self,
+        *,
+        skip_task: asyncio.Task[Any] | None,
+    ) -> None:
+        """Stop all owned resources while the lifecycle lock is held."""
+        if not self._running:
+            return
+
+        self._running = False
+        self._fail_all_pending("PaqtoNode stopped before the operation completed.")
+        self._fail_all_heartbeats()
+        current_task = asyncio.current_task()
+        excluded_tasks = {
+            task for task in (current_task, skip_task) if task is not None
+        }
+        accept_task = self._accept_task
+        if accept_task is not None and accept_task not in excluded_tasks:
+            accept_task.cancel()
+
+        reader_tasks = [
+            task for task in self._reader_tasks.values() if task not in excluded_tasks
+        ]
+        for task in reader_tasks:
+            task.cancel()
+        handler_tasks = [
+            task for task in self._handler_tasks if task not in excluded_tasks
+        ]
+        for task in handler_tasks:
+            task.cancel()
+        heartbeat_tasks = [
+            task
+            for task in self._heartbeat_tasks.values()
+            if task not in excluded_tasks
+        ]
+        reconnect_tasks = [
+            task
+            for task in self._reconnect_tasks.values()
+            if task not in excluded_tasks
+        ]
+        outbound_tasks = [
+            channel.task
+            for channel in self._outbound_channels.values()
+            if channel.task not in excluded_tasks
+        ]
+        event_task = self._event_task
+        for task in [
+            *heartbeat_tasks,
+            *reconnect_tasks,
+            *outbound_tasks,
+        ]:
+            task.cancel()
+        if event_task is not None and event_task not in excluded_tasks:
+            event_task.cancel()
+
+        self._fail_all_outbound(
+            ConnectionClosedError(
+                "PaqtoNode stopped before the frame could be sent."
             )
+        )
 
-            tasks = [
-                *reader_tasks,
-                *handler_tasks,
-                *heartbeat_tasks,
-                *reconnect_tasks,
-                *outbound_tasks,
-            ]
-            if event_task is not None and event_task is not current_task:
-                tasks.append(event_task)
-            if accept_task is not None and accept_task is not current_task:
-                tasks.append(accept_task)
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
+        listener = self._listener
+        self._listener = None
+        physical_connections = list(
+            self._incoming_connections | self._outgoing_connections
+        )
+        self._incoming_connections.clear()
+        self._outgoing_connections.clear()
+        self._sessions.clear()
+        self._session_connections.clear()
+        self._session_directions.clear()
+        self._peer_connections.clear()
+        self._last_received_activity.clear()
 
-            self._reader_tasks.clear()
-            self._handler_tasks.clear()
-            self._heartbeat_tasks.clear()
-            self._reconnect_tasks.clear()
-            self._reconnect_suppressed.clear()
-            self._accept_task = None
-            self._event_task = None
-            self._outbound_channels.clear()
-            self._discard_queue(self._inbound_queue)
-            self._discard_queue(self._event_queue)
-            self._inbound_queue = None
-            self._event_queue = None
-            service_results = await asyncio.gather(
-                self.discovery.stop(),
-                self.transport.stop(),
-                return_exceptions=True,
+        cleanup: list[Awaitable[Any]] = [
+            *(connection.close() for connection in physical_connections),
+            self._connections.close_all(),
+        ]
+        if listener is not None:
+            cleanup.append(listener.close())
+        cleanup_results = await asyncio.gather(
+            *cleanup,
+            return_exceptions=True,
+        )
+
+        tasks = [
+            *reader_tasks,
+            *handler_tasks,
+            *heartbeat_tasks,
+            *reconnect_tasks,
+            *outbound_tasks,
+        ]
+        if event_task is not None and event_task not in excluded_tasks:
+            tasks.append(event_task)
+        if accept_task is not None and accept_task not in excluded_tasks:
+            tasks.append(accept_task)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        self._reader_tasks.clear()
+        self._handler_tasks.clear()
+        self._heartbeat_tasks.clear()
+        self._reconnect_tasks.clear()
+        self._reconnect_suppressed.clear()
+        self._last_reconnect_errors.clear()
+        self._known_peers.clear()
+        self._accept_task = None
+        self._event_task = None
+        self._outbound_channels.clear()
+        self._discard_queue(self._inbound_queue)
+        self._discard_queue(self._event_queue)
+        self._inbound_queue = None
+        self._event_queue = None
+        service_results = await asyncio.gather(
+            self.discovery.stop(),
+            self.transport.stop(),
+            return_exceptions=True,
+        )
+
+        errors = [
+            result
+            for result in [*cleanup_results, *service_results]
+            if isinstance(result, BaseException)
+            and not isinstance(result, asyncio.CancelledError)
+        ]
+        if errors:
+            raise errors[0]
+
+    async def _network_changed_serialized(
+        self,
+        *,
+        skip_task: asyncio.Task[Any] | None,
+    ) -> list[DiscoveredPeer]:
+        async with self._lifecycle_lock:
+            if not self._running:
+                raise NotStartedError(
+                    "PaqtoNode must be running before network_changed()."
+                )
+            reconnect_peer_ids = set(self._peer_connections) | set(
+                self._reconnect_tasks
             )
+            await self._stop_locked(skip_task=skip_task)
+            await self._start_locked()
+            discovered = await self.discover()
+            for peer in discovered:
+                if peer.peer.id in reconnect_peer_ids:
+                    self._schedule_reconnect(peer.peer.id)
+            return discovered
 
-            errors = [
-                result
-                for result in [*cleanup_results, *service_results]
-                if isinstance(result, BaseException)
-                and not isinstance(result, asyncio.CancelledError)
-            ]
-            if errors:
-                raise errors[0]
+    @staticmethod
+    async def _await_lifecycle_task(task: asyncio.Task[T]) -> T:
+        """Finish an atomic lifecycle transition before propagating cancellation."""
+        cancellation: asyncio.CancelledError | None = None
+        failure: BaseException | None = None
+        result: T | None = None
+        while True:
+            try:
+                result = await asyncio.shield(task)
+                break
+            except asyncio.CancelledError as exc:
+                cancellation = exc
+                if task.done():
+                    break
+            except BaseException as exc:  # noqa: BLE001 - preserve cleanup result
+                failure = exc
+                break
+
+        if task.done() and not task.cancelled() and failure is None:
+            try:
+                result = task.result()
+            except BaseException as exc:  # noqa: BLE001 - propagate below
+                failure = exc
+        if cancellation is not None:
+            raise cancellation from failure
+        if failure is not None:
+            raise failure
+        return result  # type: ignore[return-value]
 
     async def discover(self, *, timeout: float | None = None) -> list[DiscoveredPeer]:
         """Discover peers and return observations still fresh under node policy.
@@ -445,18 +551,23 @@ class PaqtoNode:
         authenticate the declared peer ids.
         """
         self._ensure_running()
+        generation = self._lifecycle_generation
         for peer_id, known in list(self._known_peers.items()):
             if not known.is_fresh(self.config.peer_ttl):
                 self._known_peers.pop(peer_id, None)
                 self._emit_event(NodeEventType.PEER_EXPIRED, peer_id=peer_id)
         effective_timeout = self.config.discover_timeout if timeout is None else timeout
         try:
-            peers = await self._wait_for(
-                self.discovery.discover(timeout=effective_timeout),
-                effective_timeout,
-            )
+            discovery = self.discovery.discover(timeout=effective_timeout)
+            if effective_timeout == 0:
+                peers = await discovery
+            else:
+                peers = await self._wait_for(discovery, effective_timeout)
         except TimeoutError as exc:
             raise PaqtoTimeoutError("Timed out while discovering peers.") from exc
+
+        if not self._running or generation != self._lifecycle_generation:
+            raise NotStartedError("PaqtoNode stopped while discovery was running.")
 
         peers = [
             discovered
@@ -752,7 +863,8 @@ class PaqtoNode:
     async def _accept_loop(self) -> None:
         """Accept physical connections and enforce post-accept node admission."""
         assert self._listener is not None
-        while self._running:
+        generation = self._lifecycle_generation
+        while self._running and generation == self._lifecycle_generation:
             try:
                 connection = await self._listener.accept()
             except asyncio.CancelledError:
@@ -1299,7 +1411,8 @@ class PaqtoNode:
 
     async def _dispatch_worker(self) -> None:
         """Consume the bounded inbound queue and apply handler failure policy."""
-        while self._running:
+        generation = self._lifecycle_generation
+        while self._running and generation == self._lifecycle_generation:
             queue = self._inbound_queue
             if queue is None:
                 return
@@ -1328,7 +1441,11 @@ class PaqtoNode:
         finally:
             self._message_context.reset(token)
 
-    def _handler_finished(self, task: asyncio.Task[None]) -> None:
+    def _handler_finished(
+        self,
+        task: asyncio.Task[None],
+        generation: int,
+    ) -> None:
         self._handler_tasks.discard(task)
         if not task.cancelled():
             error = task.exception()
@@ -1337,20 +1454,24 @@ class PaqtoNode:
                     "Paqto dispatch worker terminated unexpectedly",
                     extra=self._log_context(error=error),
                 )
-        if self._running:
+        if self._running and generation == self._lifecycle_generation:
             self._start_dispatch_worker("replacement")
 
     def _start_dispatch_worker(self, label: str) -> None:
+        generation = self._lifecycle_generation
         task = asyncio.create_task(
             self._dispatch_worker(),
             name=f"paqto-dispatch-{self.peer.id}-{label}",
         )
         self._handler_tasks.add(task)
-        task.add_done_callback(self._handler_finished)
+        task.add_done_callback(
+            lambda finished: self._handler_finished(finished, generation)
+        )
 
     async def _event_worker(self) -> None:
         """Deliver best-effort events outside connection-processing tasks."""
-        while self._running:
+        generation = self._lifecycle_generation
+        while self._running and generation == self._lifecycle_generation:
             queue = self._event_queue
             if queue is None:
                 return

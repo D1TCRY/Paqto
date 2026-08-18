@@ -9,12 +9,13 @@ Import these from `paqto`:
 
 | Component | Use it for |
 | --- | --- |
-| `PaqtoNode` | Start/stop a node, discover/connect/disconnect peers, send/request/reply, register handlers/events, and inspect session state. |
+| `PaqtoNode` | Start/stop/restart network resources, refresh after host-observed network changes, discover/connect/disconnect peers, send/request/reply, register handlers/events, and inspect session state. |
 | `PaqtoConfig` | Configure protocol, timeouts, limits, liveness, backpressure, handler failure, and strict identity binding. |
 | `Message` | Represent a complete application envelope. |
 | `Peer` | Represent a logical identity; `Peer.create()` generates a random id. |
 | `Endpoint` | Represent one transport-specific address. |
 | `DiscoveredPeer` | Combine a peer claim, reachable endpoints, metadata, and freshness. |
+| `NoDiscovery` | Run with only host-provisioned endpoints and no discovery sockets. |
 | `PeerFreshness` | Interpret a discovery observation as `FRESH` or `EXPIRED`. |
 | `Serializer` | Implement safe conversion between complete `Message` objects and bytes. |
 | `NodeEvent`, `NodeEventType` | Observe best-effort lifecycle and failure events. |
@@ -31,6 +32,8 @@ Construction requires keyword arguments `name`, `transport`, `discovery`, and
 matters.
 
 - `start()` / `stop()` own the full adapter/task lifecycle.
+- `network_changed()` atomically rebuilds network resources, invalidates stale
+  endpoints, rediscovers, and schedules eligible prior peers for reconnect.
 - `discover(timeout=None)` returns fresh `DiscoveredPeer` observations.
 - `connect(target, timeout=None)` returns only after READY.
 - `disconnect(target)` intentionally closes and suppresses reconnect.
@@ -62,7 +65,8 @@ Custom adapters implement these abstract base classes from `paqto`:
   and optionally a stable `protocol_id`.
 
 Adapter lifecycle methods must cooperate with cancellation and return from
-close/stop; the core has no hard adapter shutdown deadline.
+close/stop; the core has no hard adapter shutdown deadline. Paqto does not
+install process signal handlers or create/configure the host event loop.
 
 `MessageRouter`, `EventRouter`, and `ConnectionManager` are also public and
 useful for lower-level composition or adapter testing. Applications normally
@@ -80,6 +84,7 @@ Import the built-in adapters from `paqto.lan`:
 | `LanTransport` | Framed TCP, optionally TLS-protected. |
 | `LanDiscovery` | IPv4 UDP broadcast reachability discovery. |
 | `TlsConfig` | TLS trust, verification, mTLS, identity resolver, and handshake timeout. |
+| `TlsContextConfig` | Caller-prepared client/server `SSLContext` injection and connection policy. |
 | `TlsPeerIdentityResolver` | Type alias for the certificate-to-logical-id callback. |
 | `TcpConnection` | Direct low-level access to a framed asyncio TCP connection. |
 | `TcpListener` | Direct low-level access to a TCP listener. |
@@ -107,15 +112,16 @@ state machine; bypassing it can violate READY and cleanup assumptions.
 ## Security API
 
 `SecurityInfo` is the generic immutable established-connection snapshot.
-`TlsConfig` is LAN-specific requested configuration. Do not use requested TLS
-settings as proof; inspect the established `Connection.security_info` and
-`ProtocolSession.peer_id_authenticated` when diagnostics need the actual
-result.
+`TlsConfig` and `TlsContextConfig` are LAN-specific requested configuration.
+Do not use requested TLS settings as proof; inspect the established
+`Connection.security_info` and `ProtocolSession.peer_id_authenticated` when
+diagnostics need the actual result.
 
 ## Models and mutability
 
 - Immutable: `SecurityInfo`, `HandshakeOffer`, `ProtocolSession`, heartbeat/ACK
-  models, `NodeEvent`, `ReconnectPolicy`, `TlsConfig`, and `TcpAddress`.
+  models, `NodeEvent`, `ReconnectPolicy`, `TlsConfig`, `TlsContextConfig`, and
+  `TcpAddress`.
 - Mutable: `PaqtoConfig`, `Peer`, `Endpoint`, `DiscoveredPeer`, and `Message`.
 - `SecurityInfo.metadata`, `ProtocolSession.metadata`, and `NodeEvent.metadata`
   are read-only shallow copies.

@@ -103,6 +103,13 @@ not a Paqto exception.
 - `DiscoveryError`: discovery lifecycle, serialization, socket, or send fails.
 - `NoEndpointError`: a peer has no endpoint compatible with the node transport.
 
+Temporary loss of network access or permission is reported through these
+generic transport/discovery boundaries, with the originating `OSError` or TLS
+error retained as `__cause__` where Paqto normalizes it. The core does not infer
+an operating-system-specific permission category. The host may inspect the
+cause, observe `TRANSPORT_ERROR`, restore its environment, and then call
+`network_changed()` or restart the node.
+
 ### Serialization and routing
 
 - `SerializationError`: serializer invocation fails, returns the wrong type, or
@@ -159,4 +166,3 @@ Malformed peer traffic is generally handled by closing its connection and
 emitting/logging an event rather than raising into an unrelated application
 task. Direct calls such as `connect()`, `send()`, and `request()` expose their
 own setup/correlation failures to the caller.
-

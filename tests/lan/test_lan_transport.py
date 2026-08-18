@@ -29,6 +29,20 @@ def test_transport_validates_frame_payload_timeout() -> None:
 
 
 @pytest.mark.asyncio
+async def test_transport_injects_explicit_advertised_host_into_listener() -> None:
+    transport = LanTransport(advertised_host="paqto-node.local")
+    try:
+        await transport.start()
+        listener = await transport.create_listener()
+        parsed = listener.local_endpoint
+
+        assert parsed.address == "tcp://paqto-node.local:0"
+        assert parsed.metadata["advertised_host_source"] == "configured"
+    finally:
+        await transport.stop()
+
+
+@pytest.mark.asyncio
 async def test_connect_rejects_endpoint_with_different_transport() -> None:
     transport = LanTransport(host="127.0.0.1")
 

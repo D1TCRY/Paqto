@@ -8,7 +8,7 @@ from paqto.core.config import (
 )
 from paqto.core.connection import Connection, ConnectionState
 from paqto.core.discovered import DiscoveredPeer, PeerFreshness
-from paqto.core.discovery import DiscoveryService
+from paqto.core.discovery import DiscoveryService, NoDiscovery
 from paqto.core.endpoint import Endpoint
 from paqto.core.errors import (
     AcknowledgementError,
@@ -90,6 +90,7 @@ __all__ = [
     "MessageHandler",
     "MessageRouter",
     "MessageRoutingError",
+    "NoDiscovery",
     "NoEndpointError",
     "NodeEvent",
     "NodeEventType",

@@ -5,6 +5,36 @@ is to advertise reachability and find possible endpoints. It does not establish
 a connection, authenticate a peer, authorize an action, or transport
 application messages.
 
+## Discovery is optional
+
+Omit `PaqtoNode(discovery=...)`, pass `None`, or pass the public
+`NoDiscovery()` adapter when the host already knows peer endpoints. This mode
+creates no UDP socket and performs no DNS or interface lookup. The host supplies
+a `DiscoveredPeer` directly to `connect()`, `send()`, or `request()`; Paqto then
+uses the endpoint for the normal TCP/TLS, READY, identity, ACK, and
+request/reply paths.
+
+```python
+from paqto import DiscoveredPeer, PaqtoNode, Peer
+from paqto.lan import LanTransport, endpoint_from_host_port
+
+node = PaqtoNode(
+    name="device-a",
+    transport=LanTransport(host="0.0.0.0", advertised_host="192.0.2.21"),
+    serializer=serializer,
+)
+target = DiscoveredPeer(
+    peer=Peer(id="device-b"),
+    endpoints=[endpoint_from_host_port("192.0.2.20", 7450)],
+)
+
+await node.start()
+reply = await node.request(target, {"operation": "status"}, type="request")
+```
+
+Explicit reachability is not identity proof. Use verified TLS/mTLS and strict
+authenticated identity binding where peer identity matters.
+
 ## Discovery flow
 
 At `start(local_peer, endpoints)`, the service:
@@ -34,9 +64,12 @@ serializer.
   endpoints, discovery metadata, and a UTC `last_seen` timestamp.
 
 `endpoint_for("lan")` returns the first compatible endpoint. `touch()` refreshes
-`last_seen`. `freshness(ttl)` and `is_fresh(ttl)` apply reachability freshness;
-`None` disables expiration. TTL must otherwise be finite and positive. An age
-equal to the TTL is still fresh, and future timestamps are treated as fresh.
+the diagnostic `last_seen` timestamp and its local monotonic observation
+anchor. `freshness(ttl)` and `is_fresh(ttl)` apply reachability freshness using
+monotonic elapsed time during normal operation; wall-clock adjustments do not
+change TTL passage. `None` disables expiration. TTL must otherwise be finite
+and positive. An age equal to the TTL is still fresh. Supplying an explicit
+`now=` retains deterministic wall-time evaluation when needed.
 
 ## Cache limits and expiry
 
@@ -54,6 +87,11 @@ A READY connection remains usable if the old UDP observation expires. TTL is a
 reachability policy, not an ongoing authorization decision. `PEER_EXPIRED` is
 emitted when node discovery/connect/reconnect activity re-evaluates freshness;
 there is no background expiry notification loop in `PaqtoNode`.
+
+`PaqtoNode.stop()` clears remembered discovery observations. A later `start()`
+therefore requires new discovery before opening a new outgoing session.
+`network_changed()` automates this stop/start/invalidate/discover sequence for a
+network change reported by the host.
 
 ## Trust boundary
 
@@ -87,4 +125,3 @@ with no valid LAN endpoint may still create a peer observation that cannot be
 connected to.
 
 See [Configuration](configuration.md#landiscovery) for every discovery option.
-

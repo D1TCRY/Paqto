@@ -18,7 +18,7 @@ from paqto.core import (
     Serializer,
     TransportError,
 )
-from paqto.lan import LanDiscovery, LanTransport, TlsConfig
+from paqto.lan import LanDiscovery, LanTransport, TlsConfig, TlsContextConfig
 from paqto.lan.address import parse_tcp_address
 
 CERTIFICATES = Path(__file__).parent.parent / "certificates"
@@ -50,6 +50,34 @@ def _tls(
         keyfile=key,
         cafile=CA,
         require_client_certificate=require_client_certificate,
+        peer_identity_resolver=_identity_from_test_uri,
+    )
+
+
+def _prepared_tls_contexts(
+    certificate: Path,
+    key: Path,
+    *,
+    require_client_certificate: bool = False,
+) -> TlsContextConfig:
+    ca_data = CA.read_text(encoding="ascii")
+    client_context = ssl.create_default_context(
+        ssl.Purpose.SERVER_AUTH,
+        cadata=ca_data,
+    )
+    client_context.minimum_version = ssl.TLSVersion.TLSv1_2
+    client_context.load_cert_chain(certificate, key)
+
+    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_context.minimum_version = ssl.TLSVersion.TLSv1_2
+    server_context.load_cert_chain(certificate, key)
+    if require_client_certificate:
+        server_context.verify_mode = ssl.CERT_REQUIRED
+        server_context.load_verify_locations(cadata=ca_data)
+
+    return TlsContextConfig(
+        client_context=client_context,
+        server_context=server_context,
         peer_identity_resolver=_identity_from_test_uri,
     )
 
@@ -120,6 +148,120 @@ async def test_tls_connection_is_verified_and_transports_data() -> None:
 
 
 @pytest.mark.asyncio
+async def test_caller_preconfigured_contexts_support_mtls_identity_and_close() -> None:
+    server_contexts = _prepared_tls_contexts(
+        NODE_B_CERT,
+        NODE_B_KEY,
+        require_client_certificate=True,
+    )
+    client_contexts = _prepared_tls_contexts(NODE_A_CERT, NODE_A_KEY)
+    server_transport = LanTransport(
+        host="127.0.0.1",
+        tls_contexts=server_contexts,
+    )
+    client_transport = LanTransport(
+        host="127.0.0.1",
+        tls_contexts=client_contexts,
+    )
+
+    await server_transport.start()
+    await client_transport.start()
+    assert server_transport._server_ssl_context is server_contexts.server_context
+    assert client_transport._client_ssl_context is client_contexts.client_context
+    listener = await server_transport.create_listener()
+    await listener.start()
+    client = await client_transport.connect(listener.local_endpoint, timeout=2)
+    server = await asyncio.wait_for(listener.accept(), timeout=2)
+
+    try:
+        assert client.security_info.authenticated_peer_id == "node-b"
+        assert server.security_info.authenticated_peer_id == "node-a"
+        assert client.security_info.metadata["verified_server_name"] == "127.0.0.1"
+        await client.send_frame(b"caller contexts")
+        assert await server.receive_frame() == b"caller contexts"
+    finally:
+        await _stop_transports(client_transport, server_transport)
+
+    assert client.is_closed
+    assert server.is_closed
+    assert listener._server is None
+    assert client_transport._client_ssl_context is None
+    assert server_transport._server_ssl_context is None
+
+
+@pytest.mark.asyncio
+async def test_high_level_tls_accepts_ca_data_without_a_ca_file() -> None:
+    ca_data = CA.read_text(encoding="ascii")
+    server_transport = LanTransport(
+        host="127.0.0.1",
+        tls=TlsConfig(
+            certfile=NODE_B_CERT,
+            keyfile=NODE_B_KEY,
+            cadata=ca_data,
+            require_client_certificate=True,
+            peer_identity_resolver=_identity_from_test_uri,
+        ),
+    )
+    client_transport = LanTransport(
+        host="127.0.0.1",
+        tls=TlsConfig(
+            certfile=NODE_A_CERT,
+            keyfile=NODE_A_KEY,
+            cadata=ca_data,
+            peer_identity_resolver=_identity_from_test_uri,
+        ),
+    )
+
+    try:
+        await server_transport.start()
+        await client_transport.start()
+        listener = await server_transport.create_listener()
+        await listener.start()
+        client = await client_transport.connect(listener.local_endpoint, timeout=2)
+        server = await asyncio.wait_for(listener.accept(), timeout=2)
+
+        assert client.security_info.authenticated_peer_id == "node-b"
+        assert server.security_info.authenticated_peer_id == "node-a"
+    finally:
+        await _stop_transports(client_transport, server_transport)
+
+
+def test_file_and_preconfigured_tls_modes_are_mutually_exclusive() -> None:
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        LanTransport(
+            tls=_tls(NODE_A_CERT, NODE_A_KEY),
+            tls_contexts=_prepared_tls_contexts(NODE_A_CERT, NODE_A_KEY),
+        )
+
+
+def test_tls_context_configuration_rejects_wrong_context_roles() -> None:
+    client_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+
+    with pytest.raises(ValueError, match="client_context"):
+        TlsContextConfig(
+            client_context=server_context,
+            server_context=server_context,
+        )
+    with pytest.raises(ValueError, match="server_context"):
+        TlsContextConfig(
+            client_context=client_context,
+            server_context=client_context,
+        )
+
+
+@pytest.mark.parametrize("cadata", ["", b"", object()])
+def test_tls_configuration_rejects_invalid_ca_data(cadata: object) -> None:
+    expected = ValueError if isinstance(cadata, (str, bytes)) else TypeError
+    with pytest.raises(expected):
+        TlsConfig(
+            certfile=NODE_A_CERT,
+            keyfile=NODE_A_KEY,
+            cadata=cadata,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.asyncio
 async def test_untrusted_server_certificate_is_rejected() -> None:
     server_transport = LanTransport(
         host="127.0.0.1",
@@ -132,6 +274,31 @@ async def test_untrusted_server_certificate_is_rejected() -> None:
     client_transport = LanTransport(
         host="127.0.0.1",
         tls=_tls(NODE_A_CERT, NODE_A_KEY),
+    )
+
+    try:
+        await server_transport.start()
+        await client_transport.start()
+        listener = await server_transport.create_listener()
+        await listener.start()
+
+        with pytest.raises(TransportError) as captured:
+            await client_transport.connect(listener.local_endpoint, timeout=2)
+
+        assert isinstance(captured.value.__cause__, ssl.SSLCertVerificationError)
+    finally:
+        await _stop_transports(client_transport, server_transport)
+
+
+@pytest.mark.asyncio
+async def test_preconfigured_client_context_rejects_untrusted_server() -> None:
+    server_transport = LanTransport(
+        host="127.0.0.1",
+        tls_contexts=_prepared_tls_contexts(UNTRUSTED_CERT, UNTRUSTED_KEY),
+    )
+    client_transport = LanTransport(
+        host="127.0.0.1",
+        tls_contexts=_prepared_tls_contexts(NODE_A_CERT, NODE_A_KEY),
     )
 
     try:
@@ -304,6 +471,20 @@ def test_tls_configuration_requires_explicit_verification_opt_out() -> None:
             keyfile=NODE_A_KEY,
             handshake_timeout=0,
         )
+
+
+def test_tls_configuration_preserves_existing_positional_argument_order() -> None:
+    config = TlsConfig(
+        NODE_A_CERT,
+        NODE_A_KEY,
+        CA,
+        False,
+        False,
+    )
+
+    assert config.verify_peer is False
+    assert config.check_hostname is False
+    assert config.cadata is None
 
 
 @pytest.mark.asyncio

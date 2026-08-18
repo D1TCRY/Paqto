@@ -26,9 +26,10 @@ For TLS connections, metadata can include TLS version, cipher name, whether a
 peer certificate is present, and the verified server name. It does not expose
 certificate bodies or private key data.
 
-## Enabling TLS
+## Enabling TLS from paths or in-memory trust data
 
-TLS is enabled only by passing `TlsConfig` to `LanTransport`:
+The high-level path passes `TlsConfig` to `LanTransport` and lets Paqto build
+the client and server contexts:
 
 ```python
 from paqto.lan import LanTransport, TlsConfig
@@ -41,11 +42,28 @@ tls = TlsConfig(
 transport = LanTransport(tls=tls)
 ```
 
+`cafile` and `cadata` are optional trust inputs. `cadata` accepts an ASCII PEM
+string or DER certificate bytes and is passed to
+`SSLContext.load_verify_locations()` without creating a temporary file:
+
+```python
+tls = TlsConfig(
+    certfile="/path/to/device-certificate.pem",
+    keyfile="/path/to/device-private-key.pem",
+    cadata=trusted_ca_pem,
+)
+```
+
+When both `cafile` and `cadata` are supplied, their trust anchors are combined.
+When neither is supplied, Python's default trust configuration is used for the
+relevant verification purpose. The exact contents and behavior of that default
+store depend on the Python runtime, TLS backend, and host environment.
+
 When TLS is configured:
 
 - client-side certificate-chain verification defaults to enabled;
 - client-side hostname or IP verification defaults to enabled;
-- `cafile=None` uses Python's system trust roots;
+- `cafile=None` and `cadata=None` use Python's default trust roots;
 - TLS 1.2 is the minimum accepted version;
 - each direction presents the configured certificate because the same node
   certificate/key pair is loaded into client and server contexts;
@@ -55,11 +73,59 @@ Untrusted certificate chains and hostname mismatches fail connection
 establishment. Missing or unreadable key material fails transport startup as
 `TransportError`.
 
+Python's standard `SSLContext.load_cert_chain()` accepts certificate and
+private-key filenames. Paqto therefore does not accept private-key bytes and
+does not automatically write secrets to temporary files. If certificate or key
+material is not available through accessible paths, the host should prepare
+the contexts itself as described below.
+
 Disabling certificate verification requires both
 `verify_peer=False` and `check_hostname=False`. This produces an encrypted but
 unauthenticated outgoing stream; an identity resolver is not trusted or called
 for that peer. `check_hostname=False` with `verify_peer=True` still validates
 the certificate chain but does not verify that it names the endpoint host.
+
+## Injecting caller-prepared SSL contexts
+
+The advanced path uses `TlsContextConfig` and preserves both caller-owned
+contexts unchanged:
+
+```python
+import ssl
+
+from paqto.lan import LanTransport, TlsContextConfig
+
+client_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+
+# The host configures trust, certificate chains, keys, versions, and policy.
+tls_contexts = TlsContextConfig(
+    client_context=client_context,
+    server_context=server_context,
+    peer_identity_resolver=peer_id_from_certificate,
+    handshake_timeout=10,
+)
+transport = LanTransport(tls_contexts=tls_contexts)
+```
+
+The client context's `verify_mode` and `check_hostname` determine outgoing
+authentication metadata. Paqto passes the endpoint host as `server_hostname`
+for TLS/SNI; the context decides whether to verify that identity. The server
+context's `verify_mode` determines whether client certificates are ignored,
+optional, or required. Paqto neither mutates nor reloads injected contexts.
+
+`tls=...` and `tls_contexts=...` are mutually exclusive. Supplying both is
+rejected with `ValueError`; neither mode has implicit precedence. Both client
+and server contexts are required because one `LanTransport` supports outgoing
+connections and incoming listeners.
+
+In sandboxed or embedded runtimes, the host application may prepare and inject
+SSLContext objects or provide accessible certificate paths.
+
+The host remains responsible for obtaining and protecting certificates,
+private keys, CA material, and trust anchors. This API intentionally contains
+no operating-system certificate-store integration or proprietary key-storage
+format.
 
 ## Mutual TLS
 
@@ -76,8 +142,8 @@ tls = TlsConfig(
 ```
 
 The server then uses `CERT_REQUIRED` and validates the client certificate
-against `cafile` or system client-authentication roots. Without this option,
-the server-side connection reports `encrypted=True` but
+against `cafile`, `cadata`, or default client-authentication roots. Without
+this option, the server-side connection reports `encrypted=True` but
 `authenticated=False`, even though the outgoing side may have authenticated
 the server.
 
@@ -91,8 +157,10 @@ root and, for outgoing connections by default, names the endpoint host. It does
 not define Paqto's logical `Peer.id`.
 
 `peer_identity_resolver` receives Python's decoded mapping for an already
-verified peer certificate and returns a non-empty string or `None`. Paqto does
-not impose a subject, SAN, URI, or OID convention.
+verified peer certificate and returns a non-empty string or `None`. It receives
+established connection data, not paths or Paqto-created certificate objects.
+Paqto does not impose a subject, SAN, URI, or OID convention. The same resolver
+contract is available in both TLS configuration modes.
 
 ```python
 from collections.abc import Mapping
@@ -192,4 +260,3 @@ may perform a requested application action.
   authorization, durability, or exactly-once processing.
 
 See [Production considerations](production.md) for deployment guidance.
-

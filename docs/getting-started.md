@@ -117,6 +117,13 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+`asyncio.run()` above belongs only to this standalone program entry point.
+Paqto itself exposes awaitable APIs and runs inside the event loop controlled by
+the host. The same node can complete `start()` / `stop()` more than once with
+restartable adapters. When host-specific monitoring reports a route, interface,
+or address change while running, use `await node.network_changed()` to rebuild
+network resources and rediscover endpoints.
+
 On a real LAN, UDP broadcast behavior depends on interfaces, firewall rules,
 and OS socket behavior. The repository's integration tests inject discovery
 announcements and use loopback TCP so they remain deterministic.

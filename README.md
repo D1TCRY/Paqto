@@ -31,6 +31,18 @@ python -m pip install -e ".[dev]"
 python -m pytest
 ```
 
+The offline platform-conformance suite is separate from the normal pytest
+suite and is not included in the runtime wheel:
+
+```console
+python -m platform_conformance --profile full --json paqto-conformance.json
+```
+
+A platform is marked tested only after this suite runs on a real interpreter
+on that platform. See [platform testing](docs/platform-testing.md) for report
+semantics, desktop CI, the real-device procedure, and the two-device
+interoperability tool.
+
 ## Minimal LAN example
 
 Applications provide a `Serializer` for the complete `Message` envelope. This
@@ -60,6 +72,12 @@ finally:
     await node.stop()
 ```
 
+`start()` / `stop()` are the restartable network lifecycle. The host owns the
+process or application lifecycle and decides when to call them. If the host
+detects that network interfaces or addresses changed while the node is running,
+`await node.network_changed()` rebuilds listeners, discovery, TLS connections,
+and Paqto sessions from fresh endpoint observations.
+
 See [`examples/lan_two_nodes.py`](examples/lan_two_nodes.py) for a complete
 runnable two-node example.
 
@@ -70,6 +88,10 @@ opt-in. TLS certificate verification alone also does not define a logical
 `Peer.id`; strict identity binding requires a certificate identity resolver,
 mutual TLS where incoming identity proof is required, and
 `PaqtoConfig(require_authenticated_peer_id_match=True)`.
+
+TLS can use Paqto's file-based `TlsConfig`, including custom CA data held in
+memory, or caller-prepared client and server `ssl.SSLContext` objects through
+`TlsContextConfig`. The two configuration modes are mutually exclusive.
 
 Paqto is suitable for controlled-LAN evaluation and integration testing. Do
 not describe it as secure by default or production-ready on hostile networks.
@@ -91,6 +113,8 @@ Review the [security model](docs/security.md) and
 - [Events, logging, and errors](docs/events-and-errors.md)
 - [Public API overview](docs/api-overview.md)
 - [Production considerations](docs/production.md)
+- [Platform support and portability](docs/platform-support.md)
+- [Platform conformance and interoperability testing](docs/platform-testing.md)
 
 Historical engineering reports remain under `docs/development_logs/`; they
 record how the implementation evolved and are not the current API reference.

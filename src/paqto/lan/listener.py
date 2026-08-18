@@ -28,9 +28,10 @@ from paqto.lan.security import (
 class TcpListener(Listener):
     """Asyncio TCP listener for LAN connections.
 
-    If the listener is bound to ``0.0.0.0`` or ``::``, ``local_endpoint`` tries
-    to publish a primary local IPv4 address. The real bind host is always kept
-    in ``local_endpoint.metadata["bind_host"]``.
+    If the listener is bound to a wildcard address, ``local_endpoint`` uses an
+    explicit ``advertised_host`` or best-effort local hostname resolution for
+    the matching address family. The real bind host is always kept in
+    ``local_endpoint.metadata["bind_host"]``.
 
     Established connections waiting for ``accept()`` are limited by
     ``max_pending_accepts``. Excess connections are closed. A listener cannot
@@ -45,6 +46,8 @@ class TcpListener(Listener):
         frame_payload_timeout: Seconds allowed to finish an incoming declared
             payload, or ``None`` for no deadline.
         metadata: Extra metadata copied into the advertised endpoint.
+        advertised_host: Explicit host to publish instead of automatically
+            resolving a wildcard bind.
         ssl_context: Server TLS context, or ``None`` for plain TCP.
         peer_identity_resolver: Mapping for an already verified client
             certificate; it does not authenticate an optional certificate.
@@ -60,6 +63,7 @@ class TcpListener(Listener):
         max_pending_accepts: int = 128,
         frame_payload_timeout: float | None = 30.0,
         metadata: dict[str, Any] | None = None,
+        advertised_host: str | None = None,
         ssl_context: ssl.SSLContext | None = None,
         peer_identity_resolver: TlsPeerIdentityResolver | None = None,
         ssl_handshake_timeout: float | None = None,
@@ -78,6 +82,7 @@ class TcpListener(Listener):
         self._max_pending_accepts = max_pending_accepts
         self._frame_payload_timeout = frame_payload_timeout
         self._metadata = dict(metadata or {})
+        self._advertised_host = advertised_host
         self._ssl_context = ssl_context
         self._peer_identity_resolver = peer_identity_resolver
         self._ssl_handshake_timeout = ssl_handshake_timeout
@@ -202,12 +207,16 @@ class TcpListener(Listener):
         try:
             security_info = None
             if self._ssl_context is not None:
+                certificate_required = (
+                    self._ssl_context.verify_mode == ssl.CERT_REQUIRED
+                )
                 security_info = security_info_from_writer(
                     writer,
                     peer_authenticated=(
-                        self._ssl_context.verify_mode == ssl.CERT_REQUIRED
+                        self._ssl_context.verify_mode != ssl.CERT_NONE
                     ),
                     identity_resolver=self._peer_identity_resolver,
+                    peer_certificate_required=certificate_required,
                 )
             connection = TcpConnection(
                 reader,
@@ -252,7 +261,10 @@ class TcpListener(Listener):
 
     def _build_local_endpoint(self, bind_host: str, port: int) -> Endpoint:
         """Build the advertised endpoint while retaining the real bind host."""
-        advertised_host, source = choose_advertised_host(bind_host)
+        advertised_host, source = choose_advertised_host(
+            bind_host,
+            advertised_host=self._advertised_host,
+        )
         metadata = {
             **self._metadata,
             "bind_host": bind_host,

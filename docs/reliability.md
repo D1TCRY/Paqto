@@ -80,6 +80,13 @@ Only unexpected loss of the canonical session schedules reconnect. An explicit
 latest remembered discovery object if it is still fresh. A peer known only
 from an inbound session cannot be dialed without a discovered endpoint.
 
+`network_changed()` is different from an ordinary reconnect: it first closes
+all network resources, clears cached endpoints, recreates the listener and
+discovery service, and discovers again. Previously active peers found at their
+new endpoints enter the normal configured reconnect policy. The method returns
+the fresh observations, so callers can connect explicitly when automatic
+reconnect is disabled.
+
 Every reconnect creates a new `Connection`, repeats TLS/mTLS if configured,
 performs a new hello, rechecks expected and authenticated identities,
 renegotiates capabilities and limits, and creates a new `ProtocolSession`. No
@@ -108,6 +115,12 @@ leave enough idle budget for the interval and response timeout.
 
 The LAN `frame_payload_timeout` is different again: it bounds completion of a
 TCP payload after its length header has arrived.
+
+Operational durations use monotonic clocks: asyncio deadlines and sleeps cover
+connect, handshake, send, request, ACK, discovery, reconnect, heartbeat, idle,
+and frame waits; heartbeat activity uses the running loop's monotonic clock;
+discovery TTL has a local monotonic anchor. UTC timestamps remain diagnostic
+data and are not used to measure normal TTL passage.
 
 ## Reader, writer, and handler concurrency
 
@@ -179,7 +192,15 @@ The built-in tasks and adapters are cancelled, gathered, closed, and cleared;
 tests cover shutdown under load and repeated start/stop. Pending volatile work
 is failed or discarded rather than drained to application completion.
 
+Cancelling the task awaiting `stop()` does not abandon cleanup: cancellation is
+re-raised only after the atomic stop transition finishes. Cancellation of
+discovery, connect/TLS, Paqto handshake, request, heartbeat, and reconnect work
+propagates normally; failed handshakes close their connection, request
+correlations use `finally` cleanup, and a node stop cancels shared connection
+setup owned by `ConnectionManager`.
+
 The adapter contracts do not define hard close deadlines. A custom
 `Transport`, `Listener`, `Connection`, or `DiscoveryService` whose cancellation
-or close operation never cooperates can hang shutdown. Cancelling an outer
-`stop()` is not a documented hard-cleanup guarantee.
+or close operation never cooperates can hang shutdown. Paqto cannot forcibly
+terminate host threads, processes, or operating-system resources behind a
+non-cooperative adapter.

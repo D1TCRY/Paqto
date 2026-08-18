@@ -66,8 +66,12 @@ needed:
 - [API overview](api-overview.md) — a task-oriented guide to public types.
 - [Production considerations](production.md) — deployment profiles and the
   current independent-audit findings.
+- [Platform support](platform-support.md) — portability contract, host
+  capabilities, optional features, and real-runtime validation gaps.
+- [Platform testing](platform-testing.md) — offline conformance profiles,
+  machine-readable reports, desktop CI, real-device execution, and two-device
+  interoperability.
 
 The files under `development_logs/` are chronological engineering records.
 They may describe earlier behavior or future work and should not be used as the
 current API contract.
-

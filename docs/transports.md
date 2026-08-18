@@ -21,16 +21,20 @@ OS to select a free port. A caller using the transport directly may pass a LAN
 `Endpoint` to `create_listener(bind=...)` to override those values; nodes call
 `create_listener()` without an override.
 
-The bind address and advertised address are different concepts. When bound to
-`0.0.0.0`, `::`, or an empty host, `TcpListener` tries to advertise a detected
-primary IPv4 address, then a hostname-resolved IPv4 address, and finally the
-bind value. Endpoint metadata records:
+The bind address and advertised address are different concepts. Set
+`advertised_host` when the host environment knows which route peers can use.
+Without that override, a wildcard bind uses best-effort local hostname
+resolution for the matching IPv4 or IPv6 family and finally falls back to the
+bind value. Automatic selection does not open a socket toward an Internet
+address and does not require Internet connectivity. Endpoint metadata records:
 
 - `bind_host`: the configured local bind;
-- `advertised_host_source`: `bind_host`, `primary_ipv4`, or `hostname_ipv4`.
+- `advertised_host_source`: `configured`, `bind_host`, `hostname_ipv4`, or
+  `hostname_ipv6`.
 
-This detection is best effort and may select the wrong interface on a
-multi-homed host. Configure an explicit host when the advertised route matters.
+Hostname resolution is best effort and may fail or select the wrong interface
+on a multi-homed host. A wildcard is a bind target, not a generally reachable
+peer address; configure `advertised_host` when the advertised route matters.
 
 ## TCP framing
 
@@ -79,14 +83,16 @@ waits for final shutdown.
 
 ## Connection lifecycle
 
-`LanTransport.start()` validates and creates TLS contexts when configured.
+`LanTransport.start()` validates and creates high-level TLS contexts, or adopts
+caller-prepared contexts unchanged, when configured.
 `connect()` validates the endpoint, opens the stream within the caller's
 timeout, captures endpoints and `SecurityInfo`, and tracks the connection.
 If a connect finishes after the transport has stopped or restarted, it is
 closed and rejected rather than returned into a newer lifecycle generation.
 
 `stop()` marks the transport stopped, closes its listeners and outgoing
-connections, and clears TLS contexts. The same transport object can be started
+connections, and releases its TLS context references. Caller-prepared context
+objects remain owned by the caller. The same transport object can be started
 again.
 
 ## What TCP and Paqto each add

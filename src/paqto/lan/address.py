@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import socket
 from dataclasses import dataclass
+from ipaddress import ip_address
 from typing import Any
 from urllib.parse import urlparse
 
@@ -97,26 +98,37 @@ def parse_sockname(sockname: Any) -> tuple[str, int]:
     return host, port
 
 
-def choose_advertised_host(bind_host: str) -> tuple[str, str]:
+def choose_advertised_host(
+    bind_host: str,
+    *,
+    advertised_host: str | None = None,
+) -> tuple[str, str]:
     """Choose the host to publish for a listener bound on ``bind_host``.
 
-    When binding to all interfaces, Paqto first tries to publish the primary
-    IPv4 address visible from the host. If that cannot be detected, it tries
-    hostname resolution before falling back to the configured bind host.
+    ``advertised_host`` is an explicit host-environment override and takes
+    precedence over automatic selection. When binding to all interfaces,
+    Paqto otherwise tries local hostname resolution for the bind address
+    family before falling back to the configured wildcard. Automatic
+    selection never opens a socket toward an Internet address.
 
     The second return value describes the selection source for endpoint
     metadata. Address selection is best effort and does not authenticate a host.
     """
+    if advertised_host is not None:
+        if not isinstance(advertised_host, str):
+            raise TypeError("advertised_host must be a string or None.")
+        if not advertised_host:
+            raise ValueError("advertised_host must be a non-empty string or None.")
+        return advertised_host, "configured"
+
     if bind_host not in {"0.0.0.0", "::", ""}:
         return bind_host, "bind_host"
 
-    detected = _detect_primary_ipv4()
-    if detected is not None:
-        return detected, "primary_ipv4"
-
-    resolved = _resolve_hostname_ipv4()
+    family = socket.AF_INET6 if bind_host == "::" else socket.AF_INET
+    resolved = _resolve_hostname_address(family)
     if resolved is not None:
-        return resolved, "hostname_ipv4"
+        source = "hostname_ipv6" if family == socket.AF_INET6 else "hostname_ipv4"
+        return resolved, source
 
     return bind_host or "0.0.0.0", "bind_host"
 
@@ -149,27 +161,13 @@ def _format_host(host: str) -> str:
     return host
 
 
-def _detect_primary_ipv4() -> str | None:
-    """Best-effort detect a non-loopback IPv4 address without sending data."""
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
-            udp_socket.connect(("8.8.8.8", 80))
-            host = udp_socket.getsockname()[0]
-    except OSError:
-        return None
-
-    if host.startswith("127."):
-        return None
-    return host
-
-
-def _resolve_hostname_ipv4() -> str | None:
-    """Return the first non-loopback IPv4 address resolved for this hostname."""
+def _resolve_hostname_address(family: socket.AddressFamily) -> str | None:
+    """Return a non-loopback local address resolved for this hostname."""
     try:
         infos = socket.getaddrinfo(
             socket.gethostname(),
             None,
-            family=socket.AF_INET,
+            family=family,
             type=socket.SOCK_STREAM,
         )
     except OSError:
@@ -177,6 +175,12 @@ def _resolve_hostname_ipv4() -> str | None:
 
     for info in infos:
         host = info[4][0]
-        if isinstance(host, str) and not host.startswith("127."):
+        if not isinstance(host, str):
+            continue
+        try:
+            parsed = ip_address(host.split("%", 1)[0])
+        except ValueError:
+            continue
+        if not parsed.is_loopback and not parsed.is_unspecified:
             return host
     return None

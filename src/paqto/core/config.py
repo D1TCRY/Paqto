@@ -86,10 +86,11 @@ class ReconnectPolicy:
             raise TypeError("attempt must be an integer.")
         if attempt < 0:
             raise ValueError("attempt must be greater than or equal to zero.")
-        delay = min(
-            self.maximum_delay,
-            self.initial_delay * (self.multiplier**attempt),
-        )
+        try:
+            unbounded_delay = self.initial_delay * (self.multiplier**attempt)
+        except OverflowError:
+            unbounded_delay = self.maximum_delay
+        delay = min(self.maximum_delay, unbounded_delay)
         if self.jitter == 0:
             return delay
         sample = random.random() if random_value is None else random_value

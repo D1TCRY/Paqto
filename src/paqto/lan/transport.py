@@ -19,7 +19,12 @@ from paqto.lan.address import (
 )
 from paqto.lan.connection import TcpConnection
 from paqto.lan.listener import TcpListener
-from paqto.lan.security import TlsConfig, security_info_from_writer
+from paqto.lan.security import (
+    TlsConfig,
+    TlsContextConfig,
+    TlsPeerIdentityResolver,
+    security_info_from_writer,
+)
 
 T = TypeVar("T")
 DEFAULT_MAX_FRAME_SIZE = 16 * 1024 * 1024 + 1
@@ -33,9 +38,13 @@ class LanTransport(Transport):
     Args:
         host: Listener bind host. Wildcard binds use best-effort advertised-host
             selection; configure an explicit host when routing matters.
+        advertised_host: Explicit host published for a wildcard or different
+            bind address. ``None`` uses local hostname resolution and fallback.
         port: Listener TCP port; zero asks the OS to choose one.
         max_frame_size: Maximum complete TCP-frame payload in bytes.
         tls: TLS settings, or ``None`` for unauthenticated plain TCP.
+        tls_contexts: Caller-prepared client/server TLS contexts. This advanced
+            mode is mutually exclusive with ``tls``.
         max_pending_accepts: Established connections allowed to wait for
             listener acceptance.
         frame_payload_timeout: Seconds allowed to finish a declared payload, or
@@ -50,6 +59,8 @@ class LanTransport(Transport):
         tls: TlsConfig | None = None,
         max_pending_accepts: int = DEFAULT_MAX_PENDING_ACCEPTS,
         frame_payload_timeout: float | None = DEFAULT_FRAME_PAYLOAD_TIMEOUT,
+        advertised_host: str | None = None,
+        tls_contexts: TlsContextConfig | None = None,
     ) -> None:
         validate_max_frame_size(max_frame_size)
         validate_frame_payload_timeout(frame_payload_timeout)
@@ -64,9 +75,17 @@ class LanTransport(Transport):
         self._max_frame_size = max_frame_size
         self._max_pending_accepts = max_pending_accepts
         self._frame_payload_timeout = frame_payload_timeout
+        self._advertised_host = advertised_host
         if tls is not None and not isinstance(tls, TlsConfig):
             raise TypeError("tls must be a TlsConfig or None.")
+        if tls_contexts is not None and not isinstance(
+            tls_contexts, TlsContextConfig
+        ):
+            raise TypeError("tls_contexts must be a TlsContextConfig or None.")
+        if tls is not None and tls_contexts is not None:
+            raise ValueError("tls and tls_contexts are mutually exclusive.")
         self._tls = tls
+        self._tls_contexts = tls_contexts
         self._client_ssl_context: ssl.SSLContext | None = None
         self._server_ssl_context: ssl.SSLContext | None = None
         self._started = False
@@ -93,6 +112,9 @@ class LanTransport(Transport):
                 raise TransportError(
                     "Could not initialize LAN TLS configuration."
                 ) from exc
+        elif self._tls_contexts is not None:
+            self._client_ssl_context = self._tls_contexts.client_context
+            self._server_ssl_context = self._tls_contexts.server_context
         self._lifecycle_generation += 1
         self._started = True
 
@@ -134,13 +156,10 @@ class LanTransport(Transport):
             max_pending_accepts=self._max_pending_accepts,
             frame_payload_timeout=self._frame_payload_timeout,
             metadata=metadata,
+            advertised_host=self._advertised_host,
             ssl_context=self._server_ssl_context,
-            peer_identity_resolver=(
-                self._tls.peer_identity_resolver if self._tls is not None else None
-            ),
-            ssl_handshake_timeout=(
-                self._tls.handshake_timeout if self._tls is not None else None
-            ),
+            peer_identity_resolver=self._peer_identity_resolver,
+            ssl_handshake_timeout=self._tls_handshake_timeout,
         )
         self._listeners.add(listener)
         return listener
@@ -162,15 +181,15 @@ class LanTransport(Transport):
         parsed = parse_tcp_address(endpoint.address)
         generation = self._lifecycle_generation
 
-        if self._tls is None:
+        if not self._tls_enabled:
             connection_attempt = asyncio.open_connection(parsed.host, parsed.port)
         else:
             connection_attempt = asyncio.open_connection(
                 parsed.host,
                 parsed.port,
                 ssl=self._client_ssl_context,
-                server_hostname=parsed.host if self._tls.check_hostname else None,
-                ssl_handshake_timeout=self._tls.handshake_timeout,
+                server_hostname=parsed.host,
+                ssl_handshake_timeout=self._tls_handshake_timeout,
             )
 
         try:
@@ -195,13 +214,13 @@ class LanTransport(Transport):
 
         try:
             security_info = None
-            if self._tls is not None:
+            if self._tls_enabled:
                 security_info = security_info_from_writer(
                     writer,
-                    peer_authenticated=self._tls.verify_peer,
-                    identity_resolver=self._tls.peer_identity_resolver,
+                    peer_authenticated=self._verify_peer,
+                    identity_resolver=self._peer_identity_resolver,
                     verified_server_name=(
-                        parsed.host if self._tls.check_hostname else None
+                        parsed.host if self._check_hostname else None
                     ),
                 )
             local_endpoint = endpoint_from_sockname(writer.get_extra_info("sockname"))
@@ -230,6 +249,42 @@ class LanTransport(Transport):
         }
         self._connections.add(connection)
         return connection
+
+    @property
+    def _tls_enabled(self) -> bool:
+        return self._tls is not None or self._tls_contexts is not None
+
+    @property
+    def _verify_peer(self) -> bool:
+        if self._tls is not None:
+            return self._tls.verify_peer
+        if self._tls_contexts is not None:
+            return self._tls_contexts.verify_peer
+        return False
+
+    @property
+    def _check_hostname(self) -> bool:
+        if self._tls is not None:
+            return self._tls.check_hostname
+        if self._tls_contexts is not None:
+            return self._tls_contexts.check_hostname
+        return False
+
+    @property
+    def _peer_identity_resolver(self) -> TlsPeerIdentityResolver | None:
+        if self._tls is not None:
+            return self._tls.peer_identity_resolver
+        if self._tls_contexts is not None:
+            return self._tls_contexts.peer_identity_resolver
+        return None
+
+    @property
+    def _tls_handshake_timeout(self) -> float | None:
+        if self._tls is not None:
+            return self._tls.handshake_timeout
+        if self._tls_contexts is not None:
+            return self._tls_contexts.handshake_timeout
+        return None
 
     def _ensure_started(self) -> None:
         if not self._started:

@@ -29,6 +29,16 @@ def test_reconnect_backoff_is_exponential_bounded_and_deterministic() -> None:
     assert jittered.delay_for_attempt(0, random_value=1) == pytest.approx(0.625)
 
 
+def test_reconnect_backoff_remains_bounded_after_extreme_attempt_count() -> None:
+    policy = ReconnectPolicy(
+        initial_delay=0.5,
+        multiplier=2,
+        maximum_delay=30,
+    )
+
+    assert policy.delay_for_attempt(10_000) == 30
+
+
 def test_discovered_peer_freshness_uses_explicit_ttl() -> None:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     discovered = DiscoveredPeer(
@@ -39,6 +49,32 @@ def test_discovered_peer_freshness_uses_explicit_ttl() -> None:
     assert discovered.freshness(5, now=now) is PeerFreshness.FRESH
     assert discovered.freshness(4.9, now=now) is PeerFreshness.EXPIRED
     assert discovered.is_fresh(None, now=now) is True
+
+
+def test_discovered_peer_operational_ttl_uses_monotonic_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monotonic = 100.0
+    monkeypatch.setattr("paqto.core.discovered.time.monotonic", lambda: monotonic)
+    discovered = DiscoveredPeer(peer=Peer(id="peer"))
+
+    assert discovered.is_fresh(5, monotonic_now=104.9) is True
+    assert discovered.is_fresh(5, monotonic_now=105.1) is False
+
+    wall_jump = discovered.last_seen + timedelta(days=365)
+    assert discovered.is_fresh(5, now=wall_jump) is False
+    assert discovered.is_fresh(5, monotonic_now=101.0) is True
+
+
+def test_discovered_peer_rejects_ambiguous_clock_inputs() -> None:
+    discovered = DiscoveredPeer(peer=Peer(id="peer"))
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        discovered.is_fresh(
+            1,
+            now=datetime.now(timezone.utc),
+            monotonic_now=1,
+        )
 
 
 @pytest.mark.parametrize(

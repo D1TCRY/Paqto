@@ -55,7 +55,8 @@ message semantics.
   `ProtocolSession` values, distinguish control from application frames, and
   implement hello, ACK, PING, and PONG controls.
 - Security components expose transport-neutral `SecurityInfo`; the LAN adapter
-  adds `TlsConfig` and certificate-to-peer identity resolution.
+  adds high-level `TlsConfig`, injected `TlsContextConfig`, and generic
+  certificate-to-peer identity resolution.
 - `PaqtoConfig`, `ReconnectPolicy`, `BackpressurePolicy`, and
   `HandlerErrorPolicy` define runtime behavior without changing adapter APIs.
 - `NodeEvent` and `NodeEventType` expose best-effort lifecycle and failure
@@ -98,7 +99,9 @@ handshake closes the connection and never creates READY state.
 Partial startup failure performs best-effort rollback of discovery, listener,
 and transport resources. A concurrent second start raises
 `AlreadyStartedError` after the first completes. A stopped node may be started
-again when its adapters support restart; the built-in LAN adapters do.
+again when its adapters support restart; the built-in LAN adapters do. A full
+`stop()` invalidates cached reachability so a later start cannot silently reuse
+an endpoint snapshot from the previous network lifecycle.
 
 ## Discovery and connect
 
@@ -138,14 +141,30 @@ reuse old trust state.
 `disconnect(peer)` is intentional: it closes the peer session and suppresses
 automatic reconnect until a later explicit `connect()`.
 
+`network_changed()` is the generic host-notification boundary for interface,
+route, or address changes. It performs a complete network stop/start, obtains a
+new listener endpoint, republishes it through discovery, invalidates old remote
+endpoint snapshots, and performs one discovery pass. Peers that were connected
+or reconnecting before the refresh are scheduled again when reconnect policy is
+enabled. This repeats TCP/TLS and the Paqto handshake; no old socket, trust
+result, or READY state is reused. With reconnect disabled, the host can use the
+returned observations for explicit `connect()` calls.
+
 `stop()` is idempotent. It marks the node not running, fails pending operations,
 cancels and gathers accept/read/dispatch/event/write/heartbeat/reconnect tasks,
 closes physical connections and manager/listener/discovery/transport resources,
 and discards volatile queues. Cleanup stages are attempted even when one fails;
-the first non-cancellation cleanup error is raised after the attempts.
-Third-party adapters must cooperate: an adapter
+the first non-cancellation cleanup error is raised after the attempts. If the
+task awaiting `stop()` is cancelled, Paqto completes the atomic cleanup before
+re-raising cancellation. Third-party adapters must cooperate: an adapter
 whose `close()` or `stop()` never returns can still prevent shutdown from
 finishing.
+
+Paqto does not install signal handlers, own the process, create a global event
+loop, or change event-loop policy. Core APIs are awaitable inside the loop
+managed by the host. The host decides when its own foreground/background or
+suspend/resume transitions should call `stop()`, `start()`, or
+`network_changed()`.
 
 See [Reliability](reliability.md) for state transitions and concurrency details,
 and [Protocol](protocol.md) for wire/session semantics.
