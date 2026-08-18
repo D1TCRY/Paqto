@@ -1,3 +1,5 @@
+"""Abstract discovery service contract."""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -9,17 +11,21 @@ from paqto.core.peer import Peer
 
 
 class DiscoveryService(ABC):
-    """Announces the local peer and discovers remote peers."""
+    """Announce local reachability and return remote reachability claims.
+
+    Implementations own their discovery resources between ``start()`` and
+    ``stop()``. A discovered peer is not authenticated unless a concrete
+    service explicitly supplies and documents such a mechanism.
+    """
 
     @abstractmethod
     async def start(self, local_peer: Peer, endpoints: Sequence[Endpoint]) -> None:
-        """Start announcing the local peer."""
+        """Start discovery with the local identity and reachable endpoints."""
 
     @abstractmethod
     async def stop(self) -> None:
-        """Stop announcing and discovering peers."""
+        """Stop discovery and release its resources."""
 
     @abstractmethod
     async def discover(self, *, timeout: float | None = None) -> list[DiscoveredPeer]:
-        """Return peers found by this discovery service."""
-
+        """Return current peer observations within the optional seconds budget."""

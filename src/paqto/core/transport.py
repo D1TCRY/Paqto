@@ -1,3 +1,5 @@
+"""Transport adapter contract."""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -8,7 +10,12 @@ from paqto.core.listener import Listener
 
 
 class Transport(ABC):
-    """Creates outgoing connections and incoming listeners for one medium."""
+    """Create outgoing connections and incoming listeners for one medium.
+
+    A transport owns its resources between ``start()`` and ``stop()`` and
+    returns complete-frame :class:`Connection` objects. It does not perform the
+    Paqto protocol handshake or define application delivery guarantees.
+    """
 
     @property
     @abstractmethod
@@ -17,11 +24,11 @@ class Transport(ABC):
 
     @abstractmethod
     async def start(self) -> None:
-        """Initialize transport-level resources."""
+        """Initialize resources required by ``connect`` and listeners."""
 
     @abstractmethod
     async def stop(self) -> None:
-        """Release transport-level resources."""
+        """Close transport-owned resources and cooperate with cancellation."""
 
     @abstractmethod
     async def connect(
@@ -30,9 +37,8 @@ class Transport(ABC):
         *,
         timeout: float | None = None,
     ) -> Connection:
-        """Open an outgoing connection to a compatible endpoint."""
+        """Open a connection, applying the optional timeout in seconds."""
 
     @abstractmethod
     async def create_listener(self, bind: Endpoint | None = None) -> Listener:
-        """Create a listener for incoming connections."""
-
+        """Create an unstarted listener, optionally for a specific bind route."""

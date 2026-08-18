@@ -1,5 +1,8 @@
+"""LAN TCP endpoint parsing, construction, and validation helpers."""
+
 from __future__ import annotations
 
+import math
 import socket
 from dataclasses import dataclass
 from typing import Any
@@ -15,7 +18,7 @@ MAX_UINT32 = 0xFFFFFFFF
 
 @dataclass(frozen=True, slots=True)
 class TcpAddress:
-    """Parsed TCP endpoint address."""
+    """Parsed host and port from a LAN TCP endpoint address."""
 
     host: str
     port: int
@@ -31,7 +34,9 @@ def parse_tcp_address(address: str) -> TcpAddress:
     if parsed.username or parsed.password:
         raise TransportError("LAN endpoint addresses must not include user info.")
     if parsed.path or parsed.params or parsed.query or parsed.fragment:
-        raise TransportError("LAN endpoint addresses must have the form tcp://HOST:PORT.")
+        raise TransportError(
+            "LAN endpoint addresses must have the form tcp://HOST:PORT."
+        )
 
     host = parsed.hostname
     if not host:
@@ -95,9 +100,12 @@ def parse_sockname(sockname: Any) -> tuple[str, int]:
 def choose_advertised_host(bind_host: str) -> tuple[str, str]:
     """Choose the host to publish for a listener bound on ``bind_host``.
 
-    When binding to all interfaces, the first version tries to publish the
-    primary IPv4 address visible from the host. If that cannot be detected, it
-    falls back to the configured bind host and records that choice in metadata.
+    When binding to all interfaces, Paqto first tries to publish the primary
+    IPv4 address visible from the host. If that cannot be detected, it tries
+    hostname resolution before falling back to the configured bind host.
+
+    The second return value describes the selection source for endpoint
+    metadata. Address selection is best effort and does not authenticate a host.
     """
     if bind_host not in {"0.0.0.0", "::", ""}:
         return bind_host, "bind_host"
@@ -115,10 +123,24 @@ def choose_advertised_host(bind_host: str) -> tuple[str, str]:
 
 def validate_max_frame_size(max_frame_size: int) -> None:
     """Validate the frame size limit supported by the 4-byte TCP header."""
-    if max_frame_size < 0:
-        raise ValueError("max_frame_size must be greater than or equal to zero.")
+    if not isinstance(max_frame_size, int) or isinstance(max_frame_size, bool):
+        raise TypeError("max_frame_size must be an integer.")
+    if max_frame_size <= 0:
+        raise ValueError("max_frame_size must be greater than zero.")
     if max_frame_size > MAX_UINT32:
         raise ValueError("max_frame_size cannot exceed 4,294,967,295 bytes.")
+
+
+def validate_frame_payload_timeout(value: float | None) -> None:
+    """Validate the deadline for completing a declared TCP frame payload."""
+    if value is None:
+        return
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise TypeError("frame_payload_timeout must be a number or None.")
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(
+            "frame_payload_timeout must be finite and greater than zero."
+        )
 
 
 def _format_host(host: str) -> str:
@@ -128,6 +150,7 @@ def _format_host(host: str) -> str:
 
 
 def _detect_primary_ipv4() -> str | None:
+    """Best-effort detect a non-loopback IPv4 address without sending data."""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
             udp_socket.connect(("8.8.8.8", 80))
@@ -141,6 +164,7 @@ def _detect_primary_ipv4() -> str | None:
 
 
 def _resolve_hostname_ipv4() -> str | None:
+    """Return the first non-loopback IPv4 address resolved for this hostname."""
     try:
         infos = socket.getaddrinfo(
             socket.gethostname(),
@@ -153,6 +177,6 @@ def _resolve_hostname_ipv4() -> str | None:
 
     for info in infos:
         host = info[4][0]
-        if not host.startswith("127."):
+        if isinstance(host, str) and not host.startswith("127."):
             return host
     return None

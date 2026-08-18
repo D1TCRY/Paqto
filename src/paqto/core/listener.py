@@ -1,3 +1,5 @@
+"""Abstract incoming-connection listener contract."""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -7,7 +9,12 @@ from paqto.core.endpoint import Endpoint
 
 
 class Listener(ABC):
-    """Accepts incoming byte-frame connections."""
+    """Accept incoming complete-frame connections for a transport.
+
+    Implementations allocate resources in ``start()``, block in ``accept()``
+    until a connection or terminal error is available, and wake pending accepts
+    during ``close()``. Closed listeners need not be restartable.
+    """
 
     @property
     @abstractmethod
@@ -24,12 +31,11 @@ class Listener(ABC):
 
     @abstractmethod
     async def close(self) -> None:
-        """Close the listener."""
+        """Stop accepting and release listener-owned resources."""
 
-    async def __aenter__(self) -> Listener:
+    async def __aenter__(self) -> Listener:  # noqa: PYI034 - Python 3.10 API
         await self.start()
         return self
 
     async def __aexit__(self, *args: object) -> None:
         await self.close()
-

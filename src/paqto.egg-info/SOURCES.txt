@@ -15,12 +15,15 @@ src/paqto/core/discovered.py
 src/paqto/core/discovery.py
 src/paqto/core/endpoint.py
 src/paqto/core/errors.py
+src/paqto/core/events.py
 src/paqto/core/listener.py
 src/paqto/core/manager.py
 src/paqto/core/message.py
 src/paqto/core/node.py
 src/paqto/core/peer.py
+src/paqto/core/protocol.py
 src/paqto/core/router.py
+src/paqto/core/security.py
 src/paqto/core/serializer.py
 src/paqto/core/transport.py
 src/paqto/lan/__init__.py
@@ -28,4 +31,5 @@ src/paqto/lan/address.py
 src/paqto/lan/connection.py
 src/paqto/lan/discovery.py
 src/paqto/lan/listener.py
+src/paqto/lan/security.py
 src/paqto/lan/transport.py

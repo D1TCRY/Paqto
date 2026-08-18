@@ -71,3 +71,432 @@ await node_b.stop()
 ```
 
 See `examples/lan_two_nodes.py` for a complete runnable version.
+
+## Connection security metadata
+
+Every `Connection` exposes transport-neutral `security_info` alongside
+`local_endpoint`, `remote_endpoint`, and `is_closed`. The default
+`SecurityInfo` reports no encryption or authentication guarantees; transports
+may override it after establishing any security mechanism they support. Paqto
+does not require TLS or any other specific mechanism.
+
+## TLS on the LAN transport
+
+TLS is enabled explicitly by passing `TlsConfig` to `LanTransport`. A plain
+`LanTransport()` remains available for compatibility and controlled test
+networks.
+
+```python
+from paqto import PaqtoConfig
+from paqto.lan import LanTransport, TlsConfig
+
+tls = TlsConfig(
+    certfile="/path/to/node-certificate.pem",
+    keyfile="/path/to/node-private-key.pem",
+    cafile="/path/to/trusted-ca.pem",
+    require_client_certificate=True,  # require mTLS for incoming connections
+    handshake_timeout=10,             # bound the TLS handshake in both directions
+)
+transport = LanTransport(tls=tls)
+```
+
+Once TLS is requested, outgoing certificate-chain verification and hostname
+verification are enabled by default. If `cafile` is omitted, Python's system
+trust store is used. Disabling verification requires both
+`verify_peer=False` and `check_hostname=False`; Paqto never applies that
+downgrade implicitly. TLS uses Python's `ssl` module and accepts TLS 1.2 or
+newer. The TLS handshake has a finite 10-second default deadline; it is
+configurable independently from the subsequent Paqto protocol handshake.
+
+Certificate verification does not by itself define a Paqto `Peer.id`. An
+optional `peer_identity_resolver` maps the already verified certificate
+mapping to a logical identity without imposing an X.509 naming convention in
+Paqto. Applications that require every READY session to have a matching
+authenticated identity can opt in:
+
+```python
+config = PaqtoConfig(require_authenticated_peer_id_match=True)
+```
+
+Discovery announcements remain unauthenticated hints. A discovered peer id is
+never copied into `SecurityInfo.authenticated_peer_id`; that value can only
+come from the established security mechanism.
+
+## Paqto protocol handshake
+
+`PaqtoNode` does not treat a transport connection as an application session.
+Every incoming and outgoing connection now follows this lifecycle:
+
+```text
+transport connection -> optional transport security -> Paqto handshake
+                     -> READY session -> application messages
+```
+
+Protocol version 1 uses the identifier `PAQTO`. Both peers exchange one small
+JSON `hello` control frame containing the protocol version, logical `peer_id`,
+capabilities, serializer encoding id, maximum serialized message size, and
+optional protocol metadata. JSON is used only for the fixed control hello;
+application messages continue to use the configured `Serializer`.
+
+Paqto frames have a one-byte kind marker inside the existing transport frame:
+control frames are consumed by the protocol layer, while application frames
+are passed to the serializer only after the session is ready. Incompatible
+versions or encodings, malformed hello data, timeouts, and early application
+frames fail the handshake and close the connection.
+
+The default serializer id is derived from the serializer class. Deployments
+that need a language-neutral or otherwise stable wire identifier should set it
+explicitly. Protocol options are configured without coupling them to a
+transport:
+
+```python
+config = PaqtoConfig(
+    handshake_timeout=5,
+    protocol_version=1,
+    capabilities=("feature-a", "feature-b"),
+    serializer_id="example/message-json-v1",
+    max_message_size=1024 * 1024,
+    protocol_metadata={"implementation": "example"},
+)
+```
+
+`PaqtoNode.connect()` returns only after the handshake reaches READY. The
+negotiated immutable `ProtocolSession` can be inspected with
+`node.session_for(connection)`. Its `peer_id_authenticated` flag is true only
+when the handshake id matches an identity authenticated by the connection's
+security layer.
+
+Discovery remains only a reachability hint. An outgoing hello must agree with
+the intended discovered peer id, and any available
+`SecurityInfo.authenticated_peer_id` must agree with the hello on both incoming
+and outgoing connections. Without transport authentication, the hello
+`peer_id` identifies the protocol session but is not cryptographic proof of
+who controls the connection. `require_authenticated_peer_id_match=True` makes
+such proof mandatory for every session accepted by that node.
+
+For a security-sensitive LAN deployment, use certificate verification, mTLS,
+an application-defined `peer_identity_resolver`, and
+`require_authenticated_peer_id_match=True` together. TLS without the resolver
+authenticates a certificate/hostname but does not bind it to a logical
+`Peer.id`. Plain TCP and UDP discovery are not safe identity mechanisms against
+an active network attacker.
+
+## Request/reply correlation
+
+`PaqtoNode.request()` sends a normal application `Message` and waits for a
+reply whose `reply_to` equals the request `id`. The pending correlation is
+registered before bytes are sent, so an immediate reply cannot race ahead of
+the waiting future. `PaqtoNode.reply()` creates the correlated response and,
+when called by a message handler, sends it on the same READY connection:
+
+```python
+@node_b.on_message("query")
+async def handle_query(message: Message) -> None:
+    await node_b.reply(message, {"value": 42}, type="query-result")
+
+
+response = await node_a.request(
+    target,
+    {"key": "example"},
+    type="query",
+    timeout=5,
+)
+```
+
+Replies are protocol-correlated application messages. A reply with an unknown,
+expired, or connection-mismatched `reply_to` is consumed and ignored; it is not
+dispatched as a new application request. Pending requests are removed after
+success, timeout, cancellation, connection loss, and node shutdown. A timeout
+raises `RequestTimeoutError`; connection loss or shutdown raises
+`RequestError`. The configured default is `PaqtoConfig.request_timeout`.
+
+Handlers run in a fixed pool of node-supervised workers, so the connection
+reader remains separate from application code without creating one unbounded
+task per message. Messages may be processed concurrently up to
+`handler_concurrency`; each invocation still uses the normal ordered
+`MessageRouter` handler list. Async handlers must cooperate with the event loop;
+sync handlers should return quickly and must not perform blocking I/O on the
+event-loop thread.
+
+Request/reply provides in-memory correlation only. It does not provide durable
+queues, retries, idempotency, duplicate suppression, transactions, or
+exactly-once delivery. Without an authenticated transport/session identity, a
+handshake `peer_id` still is not cryptographic proof of the replying party.
+
+## Technical acknowledgements
+
+Paqto can negotiate the `paqto.ack.v1` capability. Support is enabled by
+default and can be disabled with
+`PaqtoConfig(enable_acknowledgements=False)`. Waiting for an ACK is explicit:
+
+```python
+await node_a.send(
+    target,
+    payload,
+    type="event",
+    require_ack=True,
+    acknowledgement_timeout=2,
+)
+```
+
+An ACK is a Paqto control frame, consumed by the protocol layer and never sent
+to application handlers. It confirms only that the remote Paqto reader
+received, deserialized, and validated the message envelope. It does **not**
+mean that an application handler completed successfully, that data was made
+durable, or that any application operation succeeded. Paqto does not
+deduplicate acknowledged messages and makes no exactly-once guarantee.
+The ACK may be emitted before the bounded dispatch queue admits the message;
+later queue rejection, shutdown, cancellation, or handler failure does not
+retract it.
+
+Request and reply also accept `require_ack=True`. If the session did not
+negotiate ACK support, `AcknowledgementUnavailableError` is raised before
+sending. A missing ACK raises `AcknowledgementTimeoutError`; connection loss or
+shutdown raises `AcknowledgementError`. Pending ACK futures follow the same
+unconditional cleanup rules as pending requests.
+
+## Connection lifecycle and duplicate sessions
+
+`ConnectionState` describes the logical connection to a peer as
+`DISCONNECTED`, `CONNECTING`, `CONNECTED`, `RECONNECTING`, `CLOSING`, or
+`CLOSED`. Inspect it with `node.connection_state(peer)`; obtain the one
+canonical READY channel, when present, with `node.connection_for_peer(peer)`.
+The state belongs to orchestration rather than a physical socket because a
+reconnect creates a new `Connection` and a new protocol session.
+
+Concurrent `connect()` calls for the same peer use one shared connection
+attempt. Different peers are not serialized behind that attempt. If both peers
+open toward each other at the same time, Paqto selects one physical channel by
+a stable rule: the peer with the lexicographically smaller `Peer.id` keeps its
+outbound channel, and the other peer keeps the corresponding inbound channel.
+Duplicates in the same direction keep the first session that reached READY.
+The losing channel is closed and never becomes an additional application
+session.
+
+`await node.disconnect(peer)` closes a session intentionally and suppresses
+automatic reconnect until a later explicit `connect()`.
+
+## Automatic reconnect
+
+Reconnect is disabled by default. Enable it with an immutable
+`ReconnectPolicy`:
+
+```python
+from paqto import PaqtoConfig, ReconnectPolicy
+
+config = PaqtoConfig(
+    reconnect=ReconnectPolicy(
+        enabled=True,
+        initial_delay=0.5,
+        multiplier=2,
+        maximum_delay=30,
+        jitter=0.1,
+        max_attempts=None,  # keep trying while the node runs
+    )
+)
+```
+
+Every attempt uses bounded exponential backoff and the latest fresh discovery
+endpoint known for that peer. `max_attempts` may be a positive integer or
+`None`. `node.stop()` cancels an in-progress connection attempt or backoff
+immediately. A successfully reconnected transport must repeat its security
+handshake, Paqto hello, identity checks, and capability negotiation; no
+authentication or READY state is inherited from the old socket.
+
+Reconnect restores only the session. Paqto does not automatically resend an
+application message, ACK wait, or request. Pending operations belonging to the
+lost connection fail before reconnect begins, and a reply on a later session
+cannot complete an old request.
+
+## Heartbeat and liveness
+
+Set `heartbeat_interval` to enable Paqto PING/PONG liveness checks. PING and PONG
+are negotiated `paqto.heartbeat.v1` control frames and never enter the
+application serializer or handlers:
+
+```python
+config = PaqtoConfig(
+    heartbeat_interval=15,
+    heartbeat_timeout=5,
+)
+```
+
+Recent inbound traffic proves liveness and suppresses an unnecessary PING. If
+no traffic arrives for one interval, the node sends a PING and requires the
+matching PONG within `heartbeat_timeout`. Failure closes the exact connection,
+fails its pending operations, and may start the configured reconnect policy.
+
+## Discovery freshness
+
+`DiscoveredPeer.last_seen` is evaluated through `freshness()` / `is_fresh()`.
+`PaqtoConfig.peer_ttl` defaults to 60 seconds and prevents an expired discovery
+observation from opening a new connection or driving reconnect. `LanDiscovery`
+also prunes its cache with a configurable `peer_ttl` (60 seconds by default)
+and admits at most `max_discovered_peers` entries (1024 by default). Existing
+entries can still be refreshed while the cache is full. Set either TTL to
+`None` only when expiration is deliberately managed outside that layer.
+
+TTL is a reachability rule, not an identity or authorization signal. A live
+READY connection remains usable even if its last UDP observation expires;
+discovery continues to be an unauthenticated hint.
+
+## Backpressure, handler isolation, and limits
+
+READY application messages cross a bounded node-wide inbound queue before
+dispatch. Each READY connection also has one bounded outbound frame queue and
+one writer, preserving frame order and bounding stored queue entries. The
+default `BackpressurePolicy.WAIT` propagates pressure to the caller or network
+reader; it does **not** bound how many tasks an application may itself create
+while waiting. `REJECT` instead fails an outbound operation or closes an
+inbound peer that exceeds the configured capacity. Applications must also
+bound their own task creation. Neither policy adds persistence or delivery
+retry.
+
+An exception from an application handler becomes a `MessageRoutingError`, is
+logged without the message payload, and emits `NodeEventType.HANDLER_ERROR`.
+The default `HandlerErrorPolicy.CONTINUE` keeps the network session alive.
+`CLOSE_CONNECTION` is available when a deployment deliberately wants a
+handler failure to terminate only the associated peer connection. Handler
+errors are never silently discarded.
+
+The principal core limits are configured together:
+
+```python
+from paqto import BackpressurePolicy, HandlerErrorPolicy, PaqtoConfig
+
+config = PaqtoConfig(
+    max_message_size=1024 * 1024,       # negotiated application payload
+    max_pending_requests=1024,
+    max_pending_acknowledgements=1024,
+    max_inbound_queue=256,
+    max_outbound_queue=256,             # per READY connection
+    max_connections=128,                # includes inbound handshakes
+    handler_concurrency=4,
+    handshake_timeout=5,
+    idle_timeout=None,                  # disabled unless explicitly set
+    inbound_backpressure=BackpressurePolicy.WAIT,
+    outbound_backpressure=BackpressurePolicy.WAIT,
+    handler_error_policy=HandlerErrorPolicy.CONTINUE,
+)
+```
+
+`max_event_queue` bounds asynchronous observations as well. Events are
+diagnostic and never apply backpressure to network processing: when that queue
+is full an event is dropped with a warning. The concrete LAN transport's
+`max_frame_size` independently bounds the complete transport frame and should
+be at least large enough for the Paqto marker plus the configured application
+limit. Its default is therefore the default Paqto message limit plus one byte.
+`max_pending_accepts` (128 by default) bounds connections waiting inside the
+TCP accept queue, and `frame_payload_timeout` (30 seconds by default) closes a
+peer that declares a frame length but does not complete that payload.
+`max_message_size` remains the transport-neutral, handshake-negotiated payload
+limit.
+
+These are count and per-item limits, not an aggregate memory budget. Inbound
+and outbound queues have no byte quota, and a custom serializer may expand a
+small wire payload into a much larger Python object. Production deployments
+must choose a safe serializer and size `max_message_size`, queue counts, and
+connection counts together. `frame_payload_timeout=None` deliberately removes
+the partial-payload deadline and is not recommended for hostile peers.
+
+`idle_timeout` closes a READY connection that receives no frame within the
+configured period. Heartbeat PING/PONG counts as traffic; deployments using
+both settings should leave enough idle budget for the heartbeat interval and
+response timeout.
+
+## Lifecycle events and logging
+
+Applications can observe generic node events with sync or async listeners:
+
+```python
+from paqto import NodeEvent, NodeEventType
+
+
+@node.on_event(NodeEventType.CONNECTED)
+async def connected(event: NodeEvent) -> None:
+    print(event.peer_id, event.connection_id)
+
+
+@node.on_event()  # all event types
+def observe(event: NodeEvent) -> None:
+    ...
+```
+
+Events cover discovery/expiry observations, connection and reconnect
+transitions, established authentication, disconnects, protocol failures,
+transport/listener failures, handler failures, and resource-limit rejection.
+Discovery expiry is evaluated when discovery/connect/reconnect activity
+rechecks freshness; it is not a background authorization mechanism. A failing
+event listener is logged and does not stop other listeners or network tasks.
+Event objects contain generic identity, connection, error, and protocol
+metadata, never an application payload.
+
+Paqto uses Python's standard `logging` package under the `paqto` logger
+hierarchy. Records add fields such as `paqto_local_peer_id`, `paqto_peer_id`,
+`paqto_connection_id`, `paqto_message_id`, `paqto_message_type`, and
+`paqto_error_type` when relevant. Payloads and headers are not logged by
+default. Peer ids, message ids, and message types are still metadata and may be
+sensitive in some deployments; do not put secrets in those identifiers and
+configure log access accordingly.
+
+`start()` rejects a second concurrent start, while `stop()` is idempotent. A
+node may be started again after a completed stop. Shutdown cancels and gathers
+accept, reader, dispatch, event, writer, heartbeat, and reconnect tasks; fails
+pending request/ACK/frame futures; closes sessions, listener, discovery, and
+transport resources; and discards bounded queue contents.
+
+## Delivery guarantees and non-guarantees
+
+Paqto provides framed transport sessions, exact protocol-version and serializer
+matching, sender/recipient consistency with the READY session, optional
+authenticated `Peer.id` binding, volatile routing, request/reply correlation,
+optional technical receipt ACKs, liveness checks, and reconnect of the
+connection itself. Within one READY TCP connection, the single writer preserves
+the order in which frames leave Paqto's outbound queue.
+
+The following stages are distinct:
+
+1. A successful transport write means bytes were handed to the local transport;
+   it does not prove remote receipt.
+2. A Paqto ACK proves remote protocol receipt, deserialization, and envelope
+   validation only.
+3. Application success requires an application-defined response or other
+   domain-specific confirmation.
+
+Paqto does **not** provide exactly-once or at-least-once delivery, automatic
+message resend, durable messaging, persistence, transactions, duplicate
+suppression, global ordering, application-level success, authorization, or
+reliable/auditable event delivery. Send timeout or cancellation also does not
+prove that a queued frame was never transmitted. Reconnect establishes a new
+session and never revives pending requests or ACK waits from the old one.
+
+## Security and production status
+
+The package remains pre-alpha. Plain `LanTransport()` is appropriate only for
+controlled networks and tests. UDP discovery announcements are unauthenticated
+and spoofable; an attacker can advertise a victim peer id or endpoint. Outgoing
+handshake matching detects a discovery/hello mismatch, but only verified TLS
+plus an identity resolver can establish who owns a `Peer.id`.
+
+The built-in limits reduce application-level exhaustion but do not replace
+firewalls, OS backlog/rate limits, certificate lifecycle controls, monitoring,
+or authorization. In particular, TLS work happens before the node's
+`max_connections` admission check, so a hostile connection flood must also be
+controlled outside Paqto. Certificate revocation policy, pinning, private-key
+rotation, and application authorization are deployment responsibilities.
+Never use an unsafe deserializer (for example, untrusted pickle data): Paqto
+does not sandbox serializer code.
+
+The current code is suitable for controlled LAN evaluation and integration
+testing. Treat a security-sensitive production release as conditional on a
+strict TLS/mTLS identity profile, deployment-level flood controls, conservative
+resource sizing, supported-Python CI, and an explicit review of the chosen
+serializer and authorization model.
+
+## Migration note
+
+The retired threaded `paqto.connection.Connection(host, port)` implementation
+is not emulated. `paqto.connection` remains an import path for the current
+async abstract `Connection`, `ConnectionState`, and `SecurityInfo`, but old
+constructor and blocking send/receive behavior are intentionally breaking as
+part of the async transport architecture.

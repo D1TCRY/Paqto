@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-import paqto.lan as lan
+from paqto import lan
 from paqto.core.endpoint import Endpoint
 from paqto.core.errors import TransportError
 from paqto.lan.connection import TcpConnection
@@ -16,6 +16,16 @@ def test_lan_package_exports_public_api() -> None:
 
 def test_transport_name_is_lan() -> None:
     assert LanTransport().name == "lan"
+
+
+def test_transport_validates_pending_accept_limit() -> None:
+    with pytest.raises(ValueError, match="greater than zero"):
+        LanTransport(max_pending_accepts=0)
+
+
+def test_transport_validates_frame_payload_timeout() -> None:
+    with pytest.raises(ValueError, match="frame_payload_timeout"):
+        LanTransport(frame_payload_timeout=0)
 
 
 @pytest.mark.asyncio
@@ -79,3 +89,55 @@ async def test_connection_errors_are_converted_to_transport_error(
             await transport.connect(endpoint, timeout=1)
     finally:
         await transport.stop()
+
+
+@pytest.mark.asyncio
+async def test_connect_completing_after_stop_is_closed_and_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    reader = asyncio.StreamReader()
+
+    class FakeWriter:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def get_extra_info(self, name: str) -> object:
+            if name == "sockname":
+                return ("127.0.0.1", 50000)
+            return None
+
+        def is_closing(self) -> bool:
+            return self.closed
+
+        def close(self) -> None:
+            self.closed = True
+
+        async def wait_closed(self) -> None:
+            return None
+
+    writer = FakeWriter()
+
+    async def delayed_open_connection(
+        host: str,
+        port: int,
+    ) -> tuple[asyncio.StreamReader, FakeWriter]:
+        entered.set()
+        await release.wait()
+        return reader, writer
+
+    monkeypatch.setattr(asyncio, "open_connection", delayed_open_connection)
+    transport = LanTransport(host="127.0.0.1")
+    endpoint = Endpoint(transport="lan", address="tcp://127.0.0.1:5050")
+    await transport.start()
+    connecting = asyncio.create_task(transport.connect(endpoint))
+    await entered.wait()
+
+    await transport.stop()
+    release.set()
+
+    with pytest.raises(TransportError, match="stopped"):
+        await connecting
+    assert writer.closed is True
+    assert transport._connections == set()

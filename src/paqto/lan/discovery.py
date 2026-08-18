@@ -1,3 +1,5 @@
+"""Unauthenticated IPv4 UDP broadcast discovery for LAN peers."""
+
 from __future__ import annotations
 
 import asyncio
@@ -20,14 +22,18 @@ DEFAULT_BROADCAST_HOST = "255.255.255.255"
 DEFAULT_BIND_HOST = "0.0.0.0"
 DEFAULT_ANNOUNCE_INTERVAL = 5.0
 DEFAULT_DISCOVER_TIMEOUT = 1.0
+DEFAULT_PEER_TTL = 60.0
+DEFAULT_MAX_DISCOVERED_PEERS = 1024
 MAX_UDP_DATAGRAM_SIZE = 65_507
 MAX_DISCOVER_TIMEOUT_GUARD = 0.1
+MAX_JSON_NESTING = 32
+MAX_JSON_INTEGER_BITS = 4096
 
 SocketAddress = tuple[str, int]
 
 
 class LanDiscovery(DiscoveryService):
-    """UDP broadcast discovery for paqto peers on an IPv4 LAN.
+    """UDP broadcast discovery for Paqto peers on an IPv4 LAN.
 
     ``start()`` binds one UDP socket, enables broadcast, and begins sending
     periodic ``announce`` packets containing the local peer and its LAN
@@ -38,6 +44,21 @@ class LanDiscovery(DiscoveryService):
 
     Malformed incoming packets are ignored. Valid announces update the cache by
     ``peer.id`` and refresh ``last_seen`` with :meth:`DiscoveredPeer.touch`.
+
+    Announcements are unauthenticated reachability hints. A matching peer id in
+    discovery and the Paqto hello is still only a declared identity; transport
+    security must establish any authenticated identity.
+
+    Args:
+        discovery_port: UDP port used to bind and send discovery packets.
+        bind_host: Local IPv4 address used for the UDP socket.
+        broadcast_host: IPv4 broadcast destination.
+        announce_interval: Seconds between periodic announcements.
+        default_discover_timeout: Default collection budget in seconds.
+        metadata: Generic JSON-safe metadata included in announcements.
+        max_datagram_size: Maximum accepted and emitted UDP payload bytes.
+        peer_ttl: Cache lifetime in seconds, or ``None`` to disable expiry.
+        max_discovered_peers: Maximum distinct declared peer ids cached at once.
     """
 
     def __init__(
@@ -50,6 +71,8 @@ class LanDiscovery(DiscoveryService):
         default_discover_timeout: float = DEFAULT_DISCOVER_TIMEOUT,
         metadata: Mapping[str, Any] | None = None,
         max_datagram_size: int = MAX_UDP_DATAGRAM_SIZE,
+        peer_ttl: float | None = DEFAULT_PEER_TTL,
+        max_discovered_peers: int = DEFAULT_MAX_DISCOVERED_PEERS,
     ) -> None:
         _validate_port(discovery_port, "discovery_port")
         _validate_positive_float(announce_interval, "announce_interval")
@@ -58,6 +81,9 @@ class LanDiscovery(DiscoveryService):
             "default_discover_timeout",
         )
         _validate_max_datagram_size(max_datagram_size)
+        if peer_ttl is not None:
+            _validate_positive_float(peer_ttl, "peer_ttl")
+        _validate_positive_integer(max_discovered_peers, "max_discovered_peers")
 
         self._discovery_port = discovery_port
         self._bind_host = bind_host
@@ -66,12 +92,15 @@ class LanDiscovery(DiscoveryService):
         self._default_discover_timeout = default_discover_timeout
         self._metadata = dict(metadata or {})
         self._max_datagram_size = max_datagram_size
+        self._peer_ttl = peer_ttl
+        self._max_discovered_peers = max_discovered_peers
 
         self._local_peer: Peer | None = None
         self._endpoints: list[Endpoint] = []
         self._discovered: dict[str, DiscoveredPeer] = {}
         self._transport: asyncio.DatagramTransport | None = None
         self._announce_task: asyncio.Task[None] | None = None
+        self._lifecycle_lock = asyncio.Lock()
 
     async def start(self, local_peer: Peer, endpoints: Sequence[Endpoint]) -> None:
         """Start listening for discovery packets and announcing ``local_peer``.
@@ -80,6 +109,15 @@ class LanDiscovery(DiscoveryService):
         published. Invalid local endpoints are skipped so that discovery remains
         separate from transport setup.
         """
+        async with self._lifecycle_lock:
+            await self._start(local_peer, endpoints)
+
+    async def _start(
+        self,
+        local_peer: Peer,
+        endpoints: Sequence[Endpoint],
+    ) -> None:
+        """Validate announcement state and create the UDP endpoint atomically."""
         if self._transport is not None:
             raise DiscoveryError("LAN discovery is already started.")
 
@@ -100,7 +138,14 @@ class LanDiscovery(DiscoveryService):
             self._clear_local_state()
             raise
 
-        sock = self._create_socket()
+        try:
+            sock = self._create_socket()
+        except OSError as exc:
+            self._clear_local_state()
+            raise DiscoveryError(
+                f"Could not start LAN discovery on UDP port {self._discovery_port}."
+            ) from exc
+
         try:
             loop = asyncio.get_running_loop()
             transport, _ = await loop.create_datagram_endpoint(
@@ -113,7 +158,7 @@ class LanDiscovery(DiscoveryService):
             raise DiscoveryError(
                 f"Could not start LAN discovery on UDP port {self._discovery_port}."
             ) from exc
-        except Exception:
+        except BaseException:
             sock.close()
             self._clear_local_state()
             raise
@@ -127,6 +172,11 @@ class LanDiscovery(DiscoveryService):
         The method is idempotent and may be called safely even if discovery was
         never started or has already been stopped.
         """
+        async with self._lifecycle_lock:
+            await self._stop()
+
+    async def _stop(self) -> None:
+        """Cancel announcements, close the socket, and clear volatile caches."""
         task = self._announce_task
         self._announce_task = None
         if task is not None:
@@ -157,6 +207,7 @@ class LanDiscovery(DiscoveryService):
         if window > 0:
             await asyncio.sleep(window)
 
+        self._prune_expired()
         return list(self._discovered.values())
 
     def _create_socket(self) -> socket.socket:
@@ -185,6 +236,7 @@ class LanDiscovery(DiscoveryService):
             await asyncio.sleep(self._announce_interval)
 
     def _datagram_received(self, data: bytes, addr: Any) -> None:
+        """Validate and route one untrusted discovery datagram."""
         if len(data) > self._max_datagram_size:
             return
 
@@ -199,6 +251,7 @@ class LanDiscovery(DiscoveryService):
             self._handle_announce(payload)
 
     def _handle_discover(self, payload: dict[str, Any], addr: Any) -> None:
+        """Answer a valid non-local discovery request with an announcement."""
         local_peer = self._local_peer
         if local_peer is None:
             return
@@ -215,6 +268,7 @@ class LanDiscovery(DiscoveryService):
             pass
 
     def _handle_announce(self, payload: dict[str, Any]) -> None:
+        """Validate and cache one untrusted announcement within admission limits."""
         local_peer = self._local_peer
         if local_peer is None:
             return
@@ -233,6 +287,9 @@ class LanDiscovery(DiscoveryService):
 
         discovered = self._discovered.get(peer.id)
         if discovered is None:
+            self._prune_expired()
+            if len(self._discovered) >= self._max_discovered_peers:
+                return
             self._discovered[peer.id] = DiscoveredPeer(
                 peer=peer,
                 endpoints=endpoints,
@@ -245,7 +302,16 @@ class LanDiscovery(DiscoveryService):
         discovered.metadata = metadata
         discovered.touch()
 
+    def _prune_expired(self) -> None:
+        """Remove observations older than the configured discovery cache TTL."""
+        if self._peer_ttl is None:
+            return
+        for peer_id, discovered in list(self._discovered.items()):
+            if not discovered.is_fresh(self._peer_ttl):
+                self._discovered.pop(peer_id, None)
+
     def _parse_peer(self, value: Any) -> Peer | None:
+        """Parse a declared peer from untrusted JSON without authenticating it."""
         if not isinstance(value, dict):
             return None
 
@@ -264,6 +330,7 @@ class LanDiscovery(DiscoveryService):
         return Peer(id=peer_id, name=name, metadata=metadata)
 
     def _parse_endpoints(self, value: Any) -> list[Endpoint] | None:
+        """Parse the valid LAN endpoints from an announcement list."""
         if not isinstance(value, list):
             return None
 
@@ -301,12 +368,18 @@ class LanDiscovery(DiscoveryService):
         )
 
     def _decode_packet(self, data: bytes) -> dict[str, Any] | None:
+        """Decode bounded JSON and reject ambiguous or incompatible packets."""
         try:
-            payload = json.loads(data.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+            payload = json.loads(
+                data.decode("utf-8"),
+                object_pairs_hook=_unique_json_object,
+            )
+        except (RecursionError, UnicodeDecodeError, ValueError):
             return None
 
         if not isinstance(payload, dict):
+            return None
+        if not _is_safe_json_value(payload):
             return None
         if payload.get("paqto") != PROTOCOL_VERSION:
             return None
@@ -368,9 +441,19 @@ class LanDiscovery(DiscoveryService):
         }
 
     def _encode_packet(self, payload: dict[str, Any]) -> bytes:
+        """Encode JSON after enforcing number, nesting, and datagram limits."""
+        if not _is_safe_json_value(payload):
+            raise DiscoveryError(
+                "LAN discovery data contains unsafe numbers or exceeds the "
+                f"maximum nesting depth of {MAX_JSON_NESTING}."
+            )
         try:
-            data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        except (TypeError, ValueError) as exc:
+            data = json.dumps(
+                payload,
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (RecursionError, TypeError, ValueError) as exc:
             raise DiscoveryError(
                 "LAN discovery packet is not JSON serializable."
             ) from exc
@@ -404,10 +487,13 @@ class LanDiscovery(DiscoveryService):
 
 
 class _LanDiscoveryProtocol(asyncio.DatagramProtocol):
+    """Minimal asyncio callback bridge into :class:`LanDiscovery`."""
+
     def __init__(self, discovery: LanDiscovery) -> None:
         self._discovery = discovery
 
     def datagram_received(self, data: bytes, addr: Any) -> None:
+        """Forward one received datagram to the discovery validator."""
         self._discovery._datagram_received(data, addr)
 
     def error_received(self, exc: Exception) -> None:
@@ -426,6 +512,7 @@ def _copy_peer(peer: Peer) -> Peer:
 
 
 def _copy_valid_endpoint(endpoint: Endpoint) -> Endpoint | None:
+    """Copy a syntactically valid LAN endpoint or ignore another transport."""
     if endpoint.transport != TRANSPORT_NAME:
         return None
     if not isinstance(endpoint.address, str):
@@ -460,14 +547,14 @@ def _is_socket_address(value: Any) -> bool:
 
 def _validate_port(value: int, name: str) -> None:
     if not isinstance(value, int) or isinstance(value, bool):
-        raise ValueError(f"{name} must be an integer.")
+        raise TypeError(f"{name} must be an integer.")
     if value < 0 or value > 65_535:
         raise ValueError(f"{name} must be between 0 and 65535.")
 
 
 def _validate_positive_float(value: float, name: str) -> None:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
-        raise ValueError(f"{name} must be a number.")
+        raise TypeError(f"{name} must be a number.")
     if not math.isfinite(value):
         raise ValueError(f"{name} must be finite.")
     if value <= 0:
@@ -476,7 +563,7 @@ def _validate_positive_float(value: float, name: str) -> None:
 
 def _validate_non_negative_float(value: float, name: str) -> None:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
-        raise ValueError(f"{name} must be a number.")
+        raise TypeError(f"{name} must be a number.")
     if not math.isfinite(value):
         raise ValueError(f"{name} must be finite.")
     if value < 0:
@@ -485,8 +572,49 @@ def _validate_non_negative_float(value: float, name: str) -> None:
 
 def _validate_max_datagram_size(value: int) -> None:
     if not isinstance(value, int) or isinstance(value, bool):
-        raise ValueError("max_datagram_size must be an integer.")
+        raise TypeError("max_datagram_size must be an integer.")
     if value <= 0 or value > MAX_UDP_DATAGRAM_SIZE:
         raise ValueError(
             f"max_datagram_size must be between 1 and {MAX_UDP_DATAGRAM_SIZE}."
         )
+
+
+def _validate_positive_integer(value: int, name: str) -> None:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError(f"{name} must be an integer.")
+    if value <= 0:
+        raise ValueError(f"{name} must be greater than zero.")
+
+
+def _is_safe_json_value(value: Any) -> bool:
+    """Return whether nested JSON data satisfies number and depth limits."""
+    pending: list[tuple[Any, int]] = [(value, 0)]
+    while pending:
+        item, depth = pending.pop()
+        if isinstance(item, float) and not math.isfinite(item):
+            return False
+        if (
+            isinstance(item, int)
+            and not isinstance(item, bool)
+            and item.bit_length() > MAX_JSON_INTEGER_BITS
+        ):
+            return False
+        if isinstance(item, dict):
+            if depth >= MAX_JSON_NESTING:
+                return False
+            pending.extend((nested, depth + 1) for nested in item.values())
+        elif isinstance(item, list):
+            if depth >= MAX_JSON_NESTING:
+                return False
+            pending.extend((nested, depth + 1) for nested in item)
+    return True
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Build a JSON object while rejecting duplicate member names."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"Duplicate JSON object key {key!r}.")
+        result[key] = value
+    return result

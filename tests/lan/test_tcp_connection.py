@@ -71,6 +71,27 @@ async def test_send_receive_frame_payloads(payload: bytes) -> None:
         await client.send_frame(payload)
 
         assert await server.receive_frame() == payload
+        assert client.security_info.encrypted is False
+        assert client.security_info.authenticated is False
+    finally:
+        await _close_all(client, server)
+        await listener.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_receives_preserve_frame_boundaries() -> None:
+    listener, client, server = await _open_connection_pair()
+
+    try:
+        first_receive = asyncio.create_task(server.receive_frame())
+        second_receive = asyncio.create_task(server.receive_frame())
+        await asyncio.sleep(0)
+
+        await client.send_frame(b"first")
+        await client.send_frame(b"second")
+
+        assert await first_receive == b"first"
+        assert await second_receive == b"second"
     finally:
         await _close_all(client, server)
         await listener.close()
@@ -141,6 +162,35 @@ async def test_receive_frame_rejects_frame_over_max_frame_size() -> None:
 
         with pytest.raises(TransportError):
             await server.receive_frame()
+    finally:
+        writer.close()
+        await writer.wait_closed()
+        await server.close()
+        await listener.close()
+
+
+@pytest.mark.asyncio
+async def test_incomplete_frame_payload_times_out_and_closes_connection() -> None:
+    listener = TcpListener(
+        host="127.0.0.1",
+        port=0,
+        max_frame_size=1024,
+        frame_payload_timeout=0.01,
+    )
+    await listener.start()
+    parsed = parse_tcp_address(listener.local_endpoint.address)
+    reader, writer = await asyncio.open_connection(parsed.host, parsed.port)
+    server = await asyncio.wait_for(listener.accept(), timeout=1)
+
+    try:
+        writer.write((10).to_bytes(4, "big") + b"x")
+        await writer.drain()
+
+        with pytest.raises(TransportError, match="complete TCP frame payload"):
+            await asyncio.wait_for(server.receive_frame(), timeout=1)
+
+        assert server.is_closed
+        assert await asyncio.wait_for(reader.read(), timeout=1) == b""
     finally:
         writer.close()
         await writer.wait_closed()
