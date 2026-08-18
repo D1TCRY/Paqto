@@ -1,7 +1,7 @@
 import asyncio
 import json
 import socket
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -55,7 +55,7 @@ class MutableDiscovery(DiscoveryService):
         self.started = False
         self.published_endpoints: list[list[Endpoint]] = []
 
-    async def start(self, local_peer: Peer, endpoints: list[Endpoint]) -> None:
+    async def start(self, local_peer: Peer, endpoints: Sequence[Endpoint]) -> None:
         self.started = True
         self.published_endpoints.append(list(endpoints))
 
@@ -81,7 +81,7 @@ class MutableDiscovery(DiscoveryService):
 
 
 class PassiveDiscovery(DiscoveryService):
-    async def start(self, local_peer: Peer, endpoints: list[Endpoint]) -> None:
+    async def start(self, local_peer: Peer, endpoints: Sequence[Endpoint]) -> None:
         return None
 
     async def stop(self) -> None:

@@ -31,17 +31,19 @@ python -m pip install -e ".[dev]"
 python -m pytest
 ```
 
-The offline platform-conformance suite is separate from the normal pytest
-suite and is not included in the runtime wheel:
+The offline compatibility suite is separate from the normal pytest suite and
+is not included in the runtime wheel:
 
 ```console
-python -m platform_conformance --profile full --json paqto-conformance.json
+python compatibility_tests/run.py solo
 ```
 
-A platform is marked tested only after this suite runs on a real interpreter
-on that platform. See [platform testing](docs/platform-testing.md) for report
-semantics, desktop CI, the real-device procedure, and the two-device
-interoperability tool.
+Use the same entry point with `pair` on two real devices for cross-platform LAN
+interoperability evidence. The former `python -m platform_conformance` command
+remains a compatibility alias. See the
+[suite README](compatibility_tests/README.md) and
+[platform testing](docs/platform-testing.md) for report semantics, desktop CI,
+and real-device procedures.
 
 ## Minimal LAN example
 

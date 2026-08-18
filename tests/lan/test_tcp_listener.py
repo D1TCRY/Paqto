@@ -26,6 +26,8 @@ async def test_start_on_port_zero_exposes_real_local_endpoint() -> None:
 @pytest.mark.asyncio
 async def test_accept_returns_tcp_connection() -> None:
     listener = TcpListener(host="127.0.0.1", port=0, max_frame_size=1024)
+    writer: asyncio.StreamWriter | None = None
+    connection: TcpConnection | None = None
 
     try:
         await listener.start()
@@ -35,9 +37,11 @@ async def test_accept_returns_tcp_connection() -> None:
 
         assert isinstance(connection, TcpConnection)
     finally:
-        writer.close()
-        await writer.wait_closed()
-        await connection.close()
+        if writer is not None:
+            writer.close()
+            await writer.wait_closed()
+        if connection is not None:
+            await connection.close()
         await listener.close()
 
 

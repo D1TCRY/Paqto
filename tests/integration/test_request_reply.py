@@ -7,6 +7,7 @@ import pytest
 from paqto.core import (
     AcknowledgementTimeoutError,
     AcknowledgementUnavailableError,
+    DiscoveredPeer,
     Message,
     PaqtoConfig,
     PaqtoNode,
@@ -67,13 +68,20 @@ def _node(peer_id: str, *, acknowledgements: bool = True) -> PaqtoNode:
     )
 
 
-def _make_known(source: PaqtoNode, target: PaqtoNode) -> Any:
-    payload = target.discovery._announce_payload()
-    source.discovery._datagram_received(
+def _lan_discovery(node: PaqtoNode) -> LanDiscovery:
+    discovery = node.discovery
+    assert isinstance(discovery, LanDiscovery)
+    return discovery
+
+
+def _make_known(source: PaqtoNode, target: PaqtoNode) -> DiscoveredPeer:
+    payload = _lan_discovery(target)._announce_payload()
+    source_discovery = _lan_discovery(source)
+    source_discovery._datagram_received(
         json.dumps(payload).encode(),
         ("127.0.0.1", 0),
     )
-    return source.discovery._discovered[target.peer.id]
+    return source_discovery._discovered[target.peer.id]
 
 
 async def _stop_and_assert_clean(*nodes: PaqtoNode) -> None:

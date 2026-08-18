@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Sequence
 
 import pytest
 
@@ -100,7 +101,7 @@ class FailingDiscovery(DiscoveryService):
     def __init__(self) -> None:
         self.stop_calls = 0
 
-    async def start(self, local_peer: Peer, endpoints: list[Endpoint]) -> None:
+    async def start(self, local_peer: Peer, endpoints: Sequence[Endpoint]) -> None:
         raise DiscoveryError("startup failed")
 
     async def stop(self) -> None:
@@ -121,7 +122,7 @@ class BlockingDiscovery(DiscoveryService):
         self.start_entered = asyncio.Event()
         self.release_start = asyncio.Event()
 
-    async def start(self, local_peer: Peer, endpoints: list[Endpoint]) -> None:
+    async def start(self, local_peer: Peer, endpoints: Sequence[Endpoint]) -> None:
         self.start_calls += 1
         self.start_entered.set()
         await self.release_start.wait()
@@ -138,7 +139,7 @@ class BlockingDiscovery(DiscoveryService):
 
 
 class PassiveDiscovery(DiscoveryService):
-    async def start(self, local_peer: Peer, endpoints: list[Endpoint]) -> None:
+    async def start(self, local_peer: Peer, endpoints: Sequence[Endpoint]) -> None:
         return None
 
     async def stop(self) -> None:
@@ -165,7 +166,7 @@ class RefreshingDiscovery(DiscoveryService):
         self.stop_calls = 0
         self.remote_address = "test://remote-1"
 
-    async def start(self, local_peer: Peer, endpoints: list[Endpoint]) -> None:
+    async def start(self, local_peer: Peer, endpoints: Sequence[Endpoint]) -> None:
         self.started_endpoints.append(list(endpoints))
 
     async def stop(self) -> None:

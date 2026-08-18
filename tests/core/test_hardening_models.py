@@ -1,4 +1,5 @@
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -27,9 +28,11 @@ from paqto.lan import LanTransport
 )
 def test_bounded_resource_limits_must_be_positive_integers(field: str) -> None:
     with pytest.raises(ValueError, match=field):
-        PaqtoConfig(**{field: 0})
+        invalid_zero: dict[str, Any] = {field: 0}
+        PaqtoConfig(**invalid_zero)
     with pytest.raises(TypeError, match=field):
-        PaqtoConfig(**{field: True})
+        invalid_boolean: dict[str, Any] = {field: True}
+        PaqtoConfig(**invalid_boolean)
 
 
 def test_hardening_policies_require_explicit_enum_values() -> None:

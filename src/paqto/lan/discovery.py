@@ -214,9 +214,10 @@ class LanDiscovery(DiscoveryService):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            if hasattr(socket, "SO_REUSEPORT"):
+            reuse_port = getattr(socket, "SO_REUSEPORT", None)
+            if isinstance(reuse_port, int):
                 try:
-                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+                    sock.setsockopt(socket.SOL_SOCKET, reuse_port, 1)
                 except OSError:
                     pass
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)

@@ -69,9 +69,15 @@ def _node(
     )
 
 
+def _lan_discovery(node: PaqtoNode) -> LanDiscovery:
+    discovery = node.discovery
+    assert isinstance(discovery, LanDiscovery)
+    return discovery
+
+
 def _inject_announce(source: PaqtoNode, target: PaqtoNode) -> None:
-    payload = source.discovery._announce_payload()
-    target.discovery._datagram_received(
+    payload = _lan_discovery(source)._announce_payload()
+    _lan_discovery(target)._datagram_received(
         json.dumps(payload).encode("utf-8"),
         ("127.0.0.1", 0),
     )
@@ -91,7 +97,7 @@ async def test_two_lan_nodes_exchange_message_and_stop_cleanly() -> None:
         await sender.start()
         await receiver.start()
         _inject_announce(receiver, sender)
-        discovered_receiver = sender.discovery._discovered[receiver.peer.id]
+        discovered_receiver = _lan_discovery(sender)._discovered[receiver.peer.id]
 
         await sender.send(
             discovered_receiver,
@@ -177,7 +183,7 @@ async def test_nodes_reject_incompatible_protocol_versions_before_ready() -> Non
         await version_one.start()
         await version_two.start()
         _inject_announce(version_two, version_one)
-        discovered = version_one.discovery._discovered[version_two.peer.id]
+        discovered = _lan_discovery(version_one)._discovered[version_two.peer.id]
 
         with pytest.raises(ProtocolVersionError, match="local 1, remote 2"):
             await version_one.connect(discovered)

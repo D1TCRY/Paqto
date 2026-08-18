@@ -7,7 +7,7 @@ import os
 import ssl
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from paqto.core.errors import TransportError
 from paqto.core.security import SecurityInfo
@@ -181,9 +181,10 @@ def security_info_from_writer(
     if not callable(get_extra_info):
         raise TransportError("TLS stream does not expose connection metadata.")
 
-    ssl_object = get_extra_info("ssl_object")
-    if ssl_object is None:
+    raw_ssl_object = get_extra_info("ssl_object")
+    if raw_ssl_object is None:
         raise TransportError("TLS was configured but the stream is not encrypted.")
+    ssl_object = cast(ssl.SSLObject | ssl.SSLSocket, raw_ssl_object)
 
     certificate = ssl_object.getpeercert()
     binary_certificate = ssl_object.getpeercert(binary_form=True)
@@ -197,8 +198,11 @@ def security_info_from_writer(
 
     authenticated_peer_id: str | None = None
     if peer_authenticated and identity_resolver is not None:
+        if not isinstance(certificate, Mapping):
+            raise TransportError("TLS peer certificate metadata is not a mapping.")
         try:
-            authenticated_peer_id = identity_resolver(dict(certificate))
+            decoded_certificate = cast(Mapping[str, Any], certificate)
+            authenticated_peer_id = identity_resolver(dict(decoded_certificate))
         except Exception as exc:
             raise TransportError(
                 "Could not determine the authenticated TLS peer identity."

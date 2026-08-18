@@ -4,6 +4,7 @@ import pytest
 
 import paqto
 from paqto.connection import Connection as CompatibilityConnection
+from paqto.core import ConnectionClosedError as CoreConnectionClosedError
 from paqto.core.connection import Connection
 from paqto.core.endpoint import Endpoint
 from paqto.core.security import SecurityInfo
@@ -69,4 +70,4 @@ def test_connection_import_paths_resolve_to_the_same_async_abstraction() -> None
     assert CompatibilityConnection is Connection
     assert paqto.Connection is Connection
     assert paqto.SecurityInfo is SecurityInfo
-    assert paqto.ConnectionClosedError is paqto.core.ConnectionClosedError
+    assert paqto.ConnectionClosedError is CoreConnectionClosedError

@@ -43,20 +43,23 @@ jobs:
         run: python -X dev -m pytest -q -W error
 
       - name: Run Ruff
-        run: python -m ruff check src tests examples platform_conformance tools
+        run: python -m ruff check src tests examples compatibility_tests platform_conformance tools
 
       - name: Run mypy
-        run: python -m mypy src platform_conformance tools
+        run: python -m mypy src compatibility_tests platform_conformance tools
+
+      - name: Run Pyright
+        run: python -m pyright
 
       - name: Compile Python sources
-        run: python -m compileall -q src tests examples platform_conformance tools
+        run: python -m compileall -q src tests examples compatibility_tests platform_conformance tools
 
       - name: Build source and wheel distributions
         run: python -m build
 
-      - name: Run deterministic conformance profile
+      - name: Run deterministic solo compatibility profile
         run: >-
-          python -m platform_conformance --profile ci
+          python compatibility_tests/run.py solo --profile ci
           --json conformance-${{ runner.os }}-py${{ matrix.python }}.json
 
       - name: Upload conformance report

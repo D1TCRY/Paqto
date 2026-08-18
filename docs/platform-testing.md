@@ -1,147 +1,124 @@
-# Platform conformance and interoperability testing
+# Platform compatibility and interoperability evidence
 
-Paqto calls a platform **SUPPORTED & TESTED** only after the same repository
-conformance suite has run on a real interpreter on that platform. Architectural
-expectation, emulation by an unrelated operating system, and a passing unit
-suite elsewhere are not substitutes for that execution.
+Paqto calls a platform **SUPPORTED & TESTED** only after the repository
+compatibility suite executes on a real interpreter on that platform.
+Architectural expectation, source review, CI configuration, and execution on a
+different operating system are not substitutes for retained evidence.
 
-## Offline conformance suite
+The complete operator guide is
+[the compatibility suite README](../compatibility_tests/README.md).
 
-The suite lives in the top-level `platform_conformance/` directory, outside
-`src`, so it does not add code or fixtures to the runtime wheel. From a source
-checkout, install Paqto into the interpreter being evaluated and run:
+## Permanent offline suite
 
-```console
-python -m platform_conformance --profile full --json paqto-conformance.json
-```
+The suite lives under top-level compatibility_tests/, outside src/, and is not
+included in the runtime wheel. Its single main entry point is:
 
-The command uses only loopback/local networking and bundled public test
-certificates. It makes no Internet request and does not use the machine trust
-store. The human result is printed to the terminal and the optional JSON file
-contains:
+~~~console
+python compatibility_tests/run.py --help
+~~~
 
-- operating-system family, release, and machine architecture, without a
-  hostname or user identity;
-- Python implementation/version and installed Paqto version;
-- IPv4, IPv6, TCP, UDP, broadcast-discovery, TLS, and mTLS outcomes;
-- every check result and PASS/FAIL/SKIP/UNAVAILABLE totals.
+Solo execution:
 
-Exit codes are stable:
+~~~console
+python compatibility_tests/run.py solo
+~~~
+
+The original local checks were relocated rather than duplicated.
+python -m platform_conformance remains a thin compatibility alias to the same
+solo implementation.
+
+All checks are offline. They use loopback/local networking and bundled public
+test-only trust material, never public DNS, HTTP, cloud services, or the
+machine trust store.
+
+## Result semantics
+
+Each check is exactly one of PASS, FAIL, SKIP, or UNAVAILABLE. PASS means the
+behavior executed and met its assertions. FAIL means execution demonstrated an
+error. SKIP is an intentional scenario/profile omission. UNAVAILABLE means the
+environment could not supply a capability. A required SKIP/UNAVAILABLE makes
+the overall run INCOMPLETE.
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Every capability required by the selected profile passed. |
-| `1` | At least one executed check failed. |
-| `2` | No bug was demonstrated, but a capability required by the profile was unavailable or could not be exercised. |
+| 0 | Every required check passed. |
+| 1 | At least one executed/required check failed. |
+| 2 | No failure was demonstrated, but required evidence is unavailable. |
 
-`PASS` means the behavior ran and met its assertions. `FAIL` means Paqto or the
-conformance infrastructure behaved incorrectly. `UNAVAILABLE` means the
-environment could not provide an optional capability, such as local broadcast
-delivery. `SKIP` means the selected profile deliberately did not execute that
-check. A required SKIP or UNAVAILABLE makes the run `INCOMPLETE`, never a full
-pass.
+Every invocation writes schema-v2 JSON automatically to
+compatibility_tests/reports/, unless --json PATH selects another destination.
+Reports include platform and Python metadata, exact Paqto import provenance,
+status/count/duration details, and capability results without hostname or user
+identity. --require-installed rejects imports from this checkout's src/paqto
+tree.
 
-## Profiles and certification rule
+## Solo certification rule
 
-The `full` profile exercises all current IPv4 LAN capabilities, including a
-real local UDP broadcast exchange. A platform/version combination may be
-marked **SUPPORTED & TESTED** only when:
+The default/full solo profile exercises current local capabilities, including
+real local UDP broadcast. The CI profile deliberately skips broadcast because
+a hosted runner is not physical-LAN broadcast evidence. IPv6 is probed and
+reported as optional to the present IPv4 LAN profile.
 
-1. the unmodified `full` profile exits `0` on the real target runtime;
-2. its JSON report is retained with the code revision or release evidence;
-3. any capability claimed in the support matrix is `PASS`, not SKIP or
-   UNAVAILABLE;
-4. the ordinary test and static-check policy also passes for that revision
-   where the development toolchain is available.
+A platform/version may be marked tested only when:
 
-The `ci` profile skips broadcast delivery because hosted runners often do not
-provide a meaningful LAN broadcast domain. It still verifies imports, core
-models, IPv4 local TCP/UDP availability, framed TCP, TLS/mTLS, messaging,
-lifecycle, cleanup, and limits. A `ci` pass prevents deterministic regressions
-but does not certify UDP broadcast support. IPv6 is probed and reported as an
-optional capability; it is not silently inferred from IPv4 results.
+1. the unchanged full profile exits 0 on the real target runtime;
+2. its JSON is retained with the code revision/release evidence;
+3. every claimed capability is PASS, never inferred from another capability;
+4. ordinary tests/static checks also pass where the toolchain is available.
 
-The checks intentionally use public Paqto APIs. Direct standard-library socket
-binds are used only to establish environmental IPv4/IPv6 capability before an
-adapter check runs. An IPv6 PASS additionally requires a real Paqto TCP
-listener, client connection, framed exchange, and clean close over `::1`; a
-successful raw socket bind alone is not reported as Paqto IPv6 success.
+The report distinguishes Android from Linux using standard runtime indicators,
+including sys.getandroidapilevel() where exposed. This detection exists only in
+repository tooling; Paqto runtime behavior never branches on the OS.
 
-## Desktop CI matrix
+## Two-device pair evidence
 
-`.github/workflows/ci.yml` defines real hosted jobs for Linux, macOS, and
-Windows with Python 3.10, 3.12, and 3.14. Every matrix job runs:
+Run pair in two independent processes, normally on two devices. Direct mode
+uses NoDiscovery and an explicit server endpoint:
 
-- pytest in Python development mode with warnings treated as errors;
-- Ruff;
-- mypy;
-- compileall;
-- pip dependency consistency checks;
-- source-distribution and wheel builds;
-- the deterministic `ci` conformance profile and JSON artifact upload.
+~~~console
+python compatibility_tests/run.py pair --role server --scenario direct --bind 0.0.0.0 --advertise 192.168.1.50 --port 7450
+~~~
 
-The workflow does not replace a platform with a Linux alias and does not
-change asyncio's event-loop policy. A matrix entry becomes tested evidence only
-after the hosted job has actually completed; merely adding the workflow does
-not retroactively verify it.
+~~~console
+python compatibility_tests/run.py pair --role client --scenario direct --target 192.168.1.50 --bind 0.0.0.0 --advertise 192.168.1.60 --port 7450
+~~~
 
-## Running on a real Android runtime
+Discovery mode uses real LanDiscovery announcements and never falls back to
+direct addressing:
 
-Android remains **UNVERIFIED** until this exact suite runs under a supported
-Python interpreter actually executing on an Android device or emulator. The
-generic procedure is:
+~~~console
+python compatibility_tests/run.py pair --role server --scenario discovery --bind 0.0.0.0 --advertise 192.168.1.50 --port 7450 --discovery-port 45454
+~~~
 
-1. install or embed a Python 3.10+ interpreter that supports the standard
-   library capabilities required by the selected Paqto features;
-2. transfer the Paqto source checkout (including `platform_conformance/`) and
-   install the local Paqto wheel or source without requiring Internet access;
-3. have the host application grant the network permissions required by the
-   operating system and make the conformance entry point invokable;
-4. run `python -m platform_conformance --profile full --json
-   paqto-conformance-android.json` inside that real runtime;
-5. preserve the command exit code and JSON report with the device/runtime and
-   Paqto revision evidence;
-6. update the support matrix only if every claimed required capability passed.
+~~~console
+python compatibility_tests/run.py pair --role client --scenario discovery --bind 0.0.0.0 --advertise 192.168.1.60 --port 7450 --discovery-port 45454
+~~~
 
-If broadcast is prohibited by sandbox or network policy, the report must show
-UNAVAILABLE and exit `2`. That result is useful evidence for a reduced
-capability profile, but it is not a full LAN-discovery certification. Paqto
-cannot grant permissions or bypass host policy.
+Both roles exchange minimal application-level metadata only after TLS/mTLS,
+strict identity binding, Paqto negotiation, and READY. Their JSON reports
+contain the same server-generated session_id plus local and remote
+OS/architecture/Python/Paqto values. This allows evidence such as
+Android/CPython 3.12 to Windows/CPython 3.14 without assuming equal versions.
 
-Current state: **awaiting real Android execution**. No Android result is
-claimed by the present Windows-host run or by desktop CI configuration.
+The direct scenario verifies bidirectional sends and requests, ACKs,
+multiple/concurrent messages, a reasonable payload, controlled disconnect, a
+fresh TCP/TLS/Paqto connection, messaging after reconnect, and cleanup.
+Discovery additionally requires each device to observe the other peer id and
+endpoint and uses the discovered endpoint for the session.
 
-## Two-device interoperability exercise
+The older tools/two_device_interop.py remains historical/general-purpose
+tooling, but permanent evidence should use compatibility_tests/run.py.
 
-`tools/two_device_interop.py` runs the same public Paqto protocol between two
-independent Python processes or devices. Device A uses `--role server`; Device
-B uses `--role client`. The client verifies a READY handshake, technical ACK,
-request/reply, explicit disconnect, a fresh TCP/TLS/Paqto connection, and a
-second request/reply. The server exits automatically after the default two
-requests, so the scenario is scriptable.
+## Real Android execution and boundaries
 
-Example with an explicitly provisioned endpoint and mTLS:
+Run the suite using a supported CPython runtime on the Android device. Transfer
+the repository compatibility tooling and a local Paqto wheel/install, grant the
+host runtime's network permissions, execute solo and pair, and retain exit
+codes plus JSON. No Python UI or embedding framework is part of the procedure.
 
-```console
-python tools/two_device_interop.py --role server --peer-id node-b --remote-peer-id node-a --bind-host 0.0.0.0 --advertised-host 192.0.2.20 --local-port 7450 --security mtls --cert node-b.pem --key node-b-key.pem --ca ca.pem --identity-san-uri-prefix urn:example:peer: --require-identity-match --json device-a.json
-```
-
-```console
-python tools/two_device_interop.py --role client --peer-id node-a --remote-peer-id node-b --bind-host 0.0.0.0 --advertised-host 192.0.2.21 --local-port 7451 --peer-host 192.0.2.20 --peer-port 7450 --security mtls --cert node-a.pem --key node-a-key.pem --ca ca.pem --identity-san-uri-prefix urn:example:peer: --require-identity-match --json device-b.json
-```
-
-Replace the documentation-only addresses and certificate paths with reachable
-values. The server certificate must cover the exact hostname or IP passed by
-the client. The URI identity encoded in each certificate must match its
-`--peer-id` when strict identity matching is enabled.
-
-To test discovery, add the same `--discovery`, `--discovery-port`, and
-`--discovery-broadcast-host` values on both devices; the client may then omit
-`--peer-host` and `--peer-port`. Run separate sessions with `--security plain`,
-`tls`, and `mtls` when evidence for all three transport profiles is required.
-No library code changes are needed for Windows-to-Windows, Android-to-Windows,
-or Android-to-Android runs; only arguments and provisioned credentials differ.
-
-The tool's JSON reports are per-device evidence. Discovery failure is not
-silently converted to explicit addressing in the same run: choose the explicit
-mode deliberately when broadcast is unavailable.
+Android remains unverified until these commands actually run on Android.
+A same-host two-process pair is a harness test, not cross-platform evidence.
+Local broadcast is not cross-device broadcast. Automated software disconnect
+does not prove Wi-Fi OFF/ON, interface changes, suspend/resume, firewalls, AP
+isolation, or background policy. Follow the manual network-failure procedure in
+the suite README and retain it separately; never mark it automatically PASS.

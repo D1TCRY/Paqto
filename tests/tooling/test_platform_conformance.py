@@ -33,7 +33,7 @@ def test_conformance_report_contains_required_machine_fields() -> None:
         ],
     )
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["profile"] == "ci"
     assert report["status"] == "PASS"
     assert isinstance(report["platform"], dict)
@@ -44,11 +44,18 @@ def test_conformance_report_contains_required_machine_fields() -> None:
     assert set(capabilities) == {
         "ipv4",
         "ipv6",
-        "tcp",
-        "udp",
-        "broadcast_discovery",
+        "tcp_ipv4",
+        "udp_ipv4",
+        "tcp_ipv6",
+        "udp_ipv6",
+        "local_broadcast_discovery",
+        "no_discovery",
         "tls",
+        "custom_ca",
+        "in_memory_ca",
+        "ssl_context_injection",
         "mtls",
+        "strict_peer_identity",
     }
     tests = report["tests"]
     assert isinstance(tests, dict)
