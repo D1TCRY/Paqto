@@ -42,7 +42,7 @@ the overall run INCOMPLETE.
 | 1 | At least one executed/required check failed. |
 | 2 | No failure was demonstrated, but required evidence is unavailable. |
 
-Every invocation writes schema-v2 JSON automatically to
+Every invocation writes schema-v3 JSON automatically to
 compatibility_tests/reports/, unless --json PATH selects another destination.
 Reports include platform and Python metadata, exact Paqto import provenance,
 status/count/duration details, and capability results without hostname or user

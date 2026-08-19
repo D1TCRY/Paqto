@@ -119,8 +119,9 @@ Paqto stack. The pair establishes mTLS using public test fixtures, verifies the
 CA and both certificate identities, performs the Paqto handshake/READY state,
 bidirectional sends and requests, ACKs, multiple/concurrent messages, a
 reasonable payload, controlled disconnect, a fresh TCP/TLS/Paqto session,
-post-reconnect messaging, and cleanup. Finite timeouts prevent indefinite
-hangs.
+post-reconnect messaging, an explicit two-phase completion handshake, a
+client-initiated final disconnect observed by the server, and cleanup. Finite
+timeouts prevent indefinite hangs.
 
 Both reports contain the same server-generated UUID `session_id` and local and
 remote OS/architecture/Python/Paqto metadata. The fixed public test
@@ -132,6 +133,40 @@ To invert roles, run the server command on Android with
 `--advertise 192.168.1.60`, then run the client on Windows with
 `--target 192.168.1.60 --advertise 192.168.1.50`. The roles are test roles,
 not platform roles.
+
+## Pair completion and graceful teardown
+
+Pair completion is an application-level workflow, not a delay and not an
+inference from socket closure. After all interoperability checks and the fresh
+post-reconnect request/reply, the roles perform these session-bound exchanges:
+
+```text
+client                              server
+  | -- request compat.complete ------> |
+  | <------- compat.complete.reply --- |
+  |                                    |
+  | -- request compat.complete.confirmed -->
+  | <-- compat.complete.confirmed.reply ---
+  |                                    |
+  | -- explicit Paqto disconnect ----> |
+```
+
+Every completion payload contains the current pair `session_id`; malformed,
+out-of-order, duplicate, or cross-session messages fail a specific completion
+check. Both final replies request a Paqto technical ACK as transport/protocol
+hardening. A technical ACK proves that Paqto received the message frame; it does
+not prove that the remote compatibility program completed its workflow. The
+second correlated request/reply is the application-level confirmation.
+
+The client declares completion only after validating
+`compat.complete.confirmed.reply`, then voluntarily calls `disconnect()`. The
+server remains running, observes `DISCONNECTED` for the exact post-reconnect
+session, and only then stops its node. Separate finite timeouts cover the first
+completion request, confirmation, and final remote disconnect. Reports expose
+the stages as `protocol.completion_request`,
+`protocol.completion_confirmation`, `lifecycle.graceful_disconnect` on the
+client, `lifecycle.remote_graceful_disconnect` on the server, and
+`lifecycle.cleanup` on both roles.
 
 ## Cross-device discovery
 
@@ -159,16 +194,32 @@ discovery as separate evidence so one failure cannot be hidden.
 
 ## JSON reports
 
-Schema version 2 records `generated_at`, mode/profile or pair scenario/role,
+Schema version 3 records `generated_at`, mode/profile or pair scenario/role,
 status, per-check status and duration, capability aggregates, total duration,
 platform and Python details, and exact local Paqto provenance. Pair reports add
-the shared `session_id` and validated remote metadata. They never contain
-private-key/certificate contents or application secrets. Default filenames are
+the shared `session_id` and validated remote metadata. Local and exchanged pair
+metadata include the Paqto version/import path, Python version, compatibility
+suite version, report schema, pair protocol version, and a normalized SHA-256
+build identifier over the suite's Python sources. They never contain private
+key/certificate contents or application secrets. Default filenames are
 timestamped and include OS family, architecture, Python major/minor, mode,
 scenario, and role.
 
 The repository tracks only `compatibility_tests/reports/.gitignore`; generated
 JSON evidence is local unless explicitly copied to a retained evidence area.
+
+To compare the exact wheel and pair runner copied to two devices, run these
+portable commands from the repository root on each device:
+
+```console
+python -c "from pathlib import Path; import hashlib; p=Path('dist/paqto-0.0.1-py3-none-any.whl'); print(hashlib.sha256(p.read_bytes()).hexdigest(), p)"
+python -c "from pathlib import Path; import hashlib; p=Path('compatibility_tests/pair/runner.py'); print(hashlib.sha256(p.read_bytes()).hexdigest(), p)"
+```
+
+The same commands work in Windows PowerShell, Command Prompt, Linux, macOS,
+Android/Termux, and any normal Python runtime. Matching hashes prove identical
+file bytes; the report's suite build identifier additionally normalizes line
+endings while hashing all compatibility-suite Python sources.
 
 ## Manual Wi-Fi/network-failure procedure
 

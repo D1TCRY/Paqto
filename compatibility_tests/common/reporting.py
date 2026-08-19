@@ -12,7 +12,7 @@ from pathlib import Path
 
 from compatibility_tests.common.models import CheckResult, Status
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 REPORTS_DIRECTORY = Path(__file__).parents[1] / "reports"
 
 

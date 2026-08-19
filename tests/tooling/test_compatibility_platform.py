@@ -13,6 +13,7 @@ from compatibility_tests.common.platform_info import (
     environment_android_indicators,
 )
 from compatibility_tests.common.reporting import default_report_path, write_json
+from compatibility_tests.common.suite_info import collect_suite_info
 
 
 @pytest.mark.parametrize(
@@ -69,7 +70,7 @@ def test_android_environment_fallback_requires_both_standard_indicators() -> Non
 
 def test_json_report_is_utf8_and_round_trips() -> None:
     destination = Path("compatibility_tests/reports") / f"test-{uuid4()}.json"
-    report = {"schema_version": 2, "status": "PASS", "value": "compatibilità"}
+    report = {"schema_version": 3, "status": "PASS", "value": "compatibilità"}
 
     try:
         written = write_json(destination, report)
@@ -94,3 +95,18 @@ def test_default_json_name_is_readable_and_deterministic() -> None:
         "2026-08-18T191614-000000Z_android_aarch64_python312_"
         "pair_direct_client.json"
     )
+
+
+def test_compatibility_suite_provenance_is_stable_and_versioned() -> None:
+    first = collect_suite_info(schema_version=3, pair_protocol_version=2)
+    second = collect_suite_info(schema_version=3, pair_protocol_version=2)
+
+    assert first == second
+    assert first["version"] == "2"
+    assert first["schema_version"] == 3
+    assert first["pair_protocol_version"] == 2
+    assert str(first["build_id"]).startswith("sha256:")
+    assert len(str(first["build_id"])) == len("sha256:") + 64
+    source_file_count = first["source_file_count"]
+    assert isinstance(source_file_count, int)
+    assert source_file_count > 0

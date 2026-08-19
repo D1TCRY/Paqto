@@ -4,12 +4,18 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
 from compatibility_tests.common.serializer import PROTOCOL_ID
 
-PAIR_PROTOCOL_VERSION = 1
+PAIR_PROTOCOL_VERSION = 2
+
+COMPLETION_REQUEST = "complete"
+COMPLETION_REPLY = "complete.reply"
+COMPLETION_CONFIRMATION = "complete.confirmed"
+COMPLETION_CONFIRMATION_REPLY = "complete.confirmed.reply"
 
 
 class PairProtocolError(ValueError):
@@ -18,6 +24,45 @@ class PairProtocolError(ValueError):
 
 class RemotePairFailure(RuntimeError):
     """The other role explicitly reported a suite failure."""
+
+
+@dataclass(slots=True)
+class ServerCompletionState:
+    """Validate the ordered, session-bound server side completion workflow."""
+
+    session_id: str
+    request_received: bool = False
+    confirmation_received: bool = False
+
+    def accept_request(self, payload: object) -> dict[str, object]:
+        """Accept exactly one completion request for this pair session."""
+        validated = validate_completion_payload(
+            payload,
+            self.session_id,
+            expected_phase=COMPLETION_REQUEST,
+        )
+        if self.request_received:
+            raise PairProtocolError("completion request was received more than once")
+        if self.confirmation_received:
+            raise PairProtocolError("completion request arrived after confirmation")
+        self.request_received = True
+        return validated
+
+    def accept_confirmation(self, payload: object) -> dict[str, object]:
+        """Accept one confirmation only after the initial request completed."""
+        validated = validate_completion_payload(
+            payload,
+            self.session_id,
+            expected_phase=COMPLETION_CONFIRMATION,
+        )
+        if not self.request_received:
+            raise PairProtocolError(
+                "completion confirmation arrived before the completion request"
+            )
+        if self.confirmation_received:
+            raise PairProtocolError("completion confirmation was received more than once")
+        self.confirmation_received = True
+        return validated
 
 
 def _mapping(value: object, field: str) -> Mapping[str, Any]:
@@ -52,6 +97,8 @@ def metadata_message(
     platform: Mapping[str, object],
     python: Mapping[str, object],
     paqto_version: str,
+    paqto_import_path: str,
+    compatibility_suite: Mapping[str, object],
     capabilities: Mapping[str, object],
 ) -> dict[str, object]:
     """Build the minimal non-sensitive metadata exchanged after READY."""
@@ -71,7 +118,11 @@ def metadata_message(
             "implementation": python.get("implementation"),
             "version": python.get("version"),
         },
-        "paqto": {"version": paqto_version},
+        "paqto": {
+            "version": paqto_version,
+            "import_path": paqto_import_path,
+        },
+        "compatibility_suite": dict(compatibility_suite),
         "capabilities": dict(capabilities),
     }
 
@@ -99,6 +150,9 @@ def validate_metadata(
     platform = _mapping(raw.get("platform"), "platform")
     python = _mapping(raw.get("python"), "python")
     paqto = _mapping(raw.get("paqto"), "paqto")
+    compatibility_suite = _mapping(
+        raw.get("compatibility_suite"), "compatibility_suite"
+    )
     capabilities = _mapping(raw.get("capabilities"), "capabilities")
     for field in (
         "os_family",
@@ -111,6 +165,17 @@ def validate_metadata(
     for field in ("implementation", "version"):
         _non_empty_string(python.get(field), f"python.{field}")
     _non_empty_string(paqto.get("version"), "paqto.version")
+    _non_empty_string(paqto.get("import_path"), "paqto.import_path")
+    _non_empty_string(compatibility_suite.get("version"), "compatibility_suite.version")
+    _non_empty_string(
+        compatibility_suite.get("build_id"), "compatibility_suite.build_id"
+    )
+    for field in ("schema_version", "pair_protocol_version", "source_file_count"):
+        value = compatibility_suite.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise PairProtocolError(
+                f"compatibility_suite.{field} must be a positive integer"
+            )
     if not all(isinstance(key, str) for key in capabilities):
         raise PairProtocolError("capability keys must be strings")
     return deepcopy(dict(raw))
@@ -120,6 +185,38 @@ def session_payload(session_id: str, **values: object) -> dict[str, object]:
     """Create a small session-bound coordination payload."""
     validated = validate_session_id(session_id)
     return {"session_id": validated, **values}
+
+
+def completion_payload(
+    session_id: str,
+    phase: str,
+    **values: object,
+) -> dict[str, object]:
+    """Create one explicitly phased message in the completion workflow."""
+    if phase not in {
+        COMPLETION_REQUEST,
+        COMPLETION_REPLY,
+        COMPLETION_CONFIRMATION,
+        COMPLETION_CONFIRMATION_REPLY,
+    }:
+        raise PairProtocolError("completion phase is invalid")
+    return session_payload(session_id, completion_phase=phase, **values)
+
+
+def validate_completion_payload(
+    payload: object,
+    expected_session_id: str,
+    *,
+    expected_phase: str,
+) -> dict[str, object]:
+    """Validate the pair session and exact phase of a completion message."""
+    raw = validate_session_payload(payload, expected_session_id)
+    phase = raw.get("completion_phase")
+    if phase != expected_phase:
+        raise PairProtocolError(
+            f"completion phase must be {expected_phase!r}, got {phase!r}"
+        )
+    return raw
 
 
 def validate_session_payload(

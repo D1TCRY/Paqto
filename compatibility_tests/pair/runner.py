@@ -35,12 +35,22 @@ from compatibility_tests.common.serializer import (
     PROTOCOL_ID,
     CompatibilityJsonSerializer,
 )
+from compatibility_tests.common.suite_info import collect_suite_info
 from compatibility_tests.pair.protocol import (
+    COMPLETION_CONFIRMATION,
+    COMPLETION_CONFIRMATION_REPLY,
+    COMPLETION_REPLY,
+    COMPLETION_REQUEST,
+    PAIR_PROTOCOL_VERSION,
+    PairProtocolError,
     RemotePairFailure,
+    ServerCompletionState,
+    completion_payload,
     failure_message,
     metadata_message,
     raise_remote_failure,
     session_payload,
+    validate_completion_payload,
     validate_metadata,
     validate_session_payload,
 )
@@ -48,11 +58,16 @@ from paqto import (
     DiscoveredPeer,
     DiscoveryError,
     Message,
+    NodeEvent,
+    NodeEventType,
     NoDiscovery,
     PaqtoConfig,
     PaqtoNode,
     PaqtoTimeoutError,
     Peer,
+    ProtocolSession,
+    RequestError,
+    RequestTimeoutError,
 )
 from paqto.lan import LanDiscovery, LanTransport, TlsConfig, endpoint_from_host_port
 
@@ -119,6 +134,19 @@ class Recorder:
         duration_ms: float = 0.0,
     ) -> None:
         if id in self._ids:
+            if status is Status.FAIL:
+                for index, result in enumerate(self.results):
+                    if result.id == id and result.status is not Status.FAIL:
+                        self.results[index] = CheckResult(
+                            id=id,
+                            category=id.split(".", 1)[0],
+                            description=description,
+                            status=status,
+                            required=required,
+                            duration_ms=duration_ms,
+                            detail=detail,
+                        )
+                        break
             return
         self._ids.add(id)
         self.results.append(
@@ -135,6 +163,10 @@ class Recorder:
 
     def passed(self, id: str, description: str, detail: str = "passed") -> None:
         self.add(id, description, Status.PASS, detail)
+
+    @property
+    def has_failure(self) -> bool:
+        return any(result.status is Status.FAIL for result in self.results)
 
 
 def _identity_from_test_uri(certificate: Mapping[str, Any]) -> str | None:
@@ -199,6 +231,10 @@ def _local_environment() -> dict[str, object]:
         "platform": collect_platform_info(),
         "python": collect_python_info(),
         "paqto": collect_package_info(),
+        "compatibility_suite": collect_suite_info(
+            schema_version=SCHEMA_VERSION,
+            pair_protocol_version=PAIR_PROTOCOL_VERSION,
+        ),
         "capabilities": {
             "tcp": True,
             "tls": True,
@@ -213,15 +249,22 @@ def _metadata(local: dict[str, object], session_id: str | None) -> dict[str, obj
     python_info = local["python"]
     package = local["paqto"]
     capabilities = local["capabilities"]
+    suite = local["compatibility_suite"]
     assert isinstance(platform_info, dict)
     assert isinstance(python_info, dict)
     assert isinstance(package, dict)
     assert isinstance(capabilities, dict)
+    assert isinstance(suite, dict)
+    import_path = package.get("import_path")
+    if not isinstance(import_path, str) or not import_path:
+        raise PairProtocolError("local Paqto import path is unavailable")
     return metadata_message(
         session_id=session_id,
         platform=platform_info,
         python=python_info,
         paqto_version=str(package.get("version", "unknown")),
+        paqto_import_path=import_path,
+        compatibility_suite=suite,
         capabilities=capabilities,
     )
 
@@ -280,7 +323,7 @@ def _inspect_ready(
     recorder: Recorder,
     *,
     reconnect: bool = False,
-) -> int:
+) -> ProtocolSession:
     session = node.session_for(connection)
     if session is None or session.peer_id != expected_peer_id:
         raise AssertionError("connection has no READY session for the expected peer")
@@ -311,7 +354,7 @@ def _inspect_ready(
         recorder.passed("security.identity", "authenticated peer identity binding")
         recorder.passed("protocol.handshake", "Paqto protocol handshake")
         recorder.passed("protocol.ready", "Paqto READY session")
-    return id(session)
+    return session
 
 
 def _assert_clean(node: PaqtoNode) -> None:
@@ -329,6 +372,171 @@ def _assert_clean(node: PaqtoNode) -> None:
         raise AssertionError(f"Paqto resources remain after stop: {leaked}")
 
 
+class CompletionWorkflowError(RuntimeError):
+    """One explicit stage of pair completion failed."""
+
+
+def _failure_detail(stage: str, error: BaseException) -> str:
+    if isinstance(error, RequestTimeoutError):
+        return f"{stage} timed out while waiting for its correlated reply: {error}"
+    if isinstance(error, RequestError):
+        return f"connection was lost during {stage}: {error}"
+    if isinstance(error, PairProtocolError):
+        return f"{stage} payload was invalid: {error}"
+    return f"{stage} failed with {type(error).__name__}: {error}"
+
+
+def _record_completion_failure(
+    recorder: Recorder,
+    check_id: str,
+    description: str,
+    stage: str,
+    error: BaseException,
+) -> CompletionWorkflowError:
+    detail = _failure_detail(stage, error)
+    recorder.add(check_id, description, Status.FAIL, detail)
+    return CompletionWorkflowError(detail)
+
+
+async def _stop_and_record(node: PaqtoNode, recorder: Recorder) -> None:
+    try:
+        await node.stop()
+        _assert_clean(node)
+    except Exception as exc:
+        recorder.add(
+            "lifecycle.cleanup",
+            "final task/socket/correlation cleanup",
+            Status.FAIL,
+            f"cleanup failed with {type(exc).__name__}: {exc}",
+        )
+        raise
+    recorder.passed("lifecycle.cleanup", "final task/socket/correlation cleanup")
+
+
+async def _wait_server_stage(
+    *,
+    expected: asyncio.Event,
+    failure: asyncio.Event,
+    failure_errors: list[BaseException],
+    remote_disconnected: asyncio.Event,
+    timeout: float,
+    recorder: Recorder,
+    check_id: str,
+    description: str,
+    stage: str,
+) -> None:
+    expected_task = asyncio.create_task(expected.wait())
+    failure_task = asyncio.create_task(failure.wait())
+    disconnected_task = asyncio.create_task(remote_disconnected.wait())
+    done, pending = await asyncio.wait(
+        {expected_task, failure_task, disconnected_task},
+        timeout=timeout,
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    if expected_task in done:
+        return
+    if failure_task in done:
+        raise failure_errors[0]
+    if disconnected_task in done:
+        error = RequestError(f"peer disconnected before {stage} completed")
+    else:
+        error = RequestTimeoutError(f"timed out waiting for {stage}")
+    raise _record_completion_failure(
+        recorder,
+        check_id,
+        description,
+        stage,
+        error,
+    )
+
+
+async def _run_client_completion(
+    node: Any,
+    target: DiscoveredPeer | Peer,
+    session_id: str,
+    recorder: Recorder,
+    timeout: float,
+) -> None:
+    request_description = "pair completion request/reply"
+    try:
+        completion = await node.request(
+            target,
+            completion_payload(session_id, COMPLETION_REQUEST),
+            type="compat.complete",
+            timeout=timeout,
+            require_ack=True,
+        )
+        completion_result = validate_completion_payload(
+            completion.payload,
+            session_id,
+            expected_phase=COMPLETION_REPLY,
+        )
+        if completion_result.get("server_status") != "PASS":
+            raise RemotePairFailure("server did not propagate a PASS result")
+    except Exception as exc:
+        raise _record_completion_failure(
+            recorder,
+            "protocol.completion_request",
+            request_description,
+            "completion request",
+            exc,
+        ) from exc
+    recorder.passed(
+        "protocol.completion_request",
+        request_description,
+        "client received and validated compat.complete.reply",
+    )
+
+    confirmation_description = "pair completion confirmation request/reply"
+    try:
+        confirmation = await node.request(
+            target,
+            completion_payload(session_id, COMPLETION_CONFIRMATION),
+            type="compat.complete.confirmed",
+            timeout=timeout,
+            require_ack=True,
+        )
+        confirmation_result = validate_completion_payload(
+            confirmation.payload,
+            session_id,
+            expected_phase=COMPLETION_CONFIRMATION_REPLY,
+        )
+        if confirmation_result.get("server_status") != "PASS":
+            raise RemotePairFailure("server did not confirm completion with PASS")
+    except Exception as exc:
+        raise _record_completion_failure(
+            recorder,
+            "protocol.completion_confirmation",
+            confirmation_description,
+            "completion confirmation",
+            exc,
+        ) from exc
+    recorder.passed(
+        "protocol.completion_confirmation",
+        confirmation_description,
+        "client received and validated compat.complete.confirmed.reply",
+    )
+
+    try:
+        await node.disconnect(target)
+    except Exception as exc:
+        recorder.add(
+            "lifecycle.graceful_disconnect",
+            "client-initiated disconnect after completion",
+            Status.FAIL,
+            f"explicit disconnect failed with {type(exc).__name__}: {exc}",
+        )
+        raise
+    recorder.passed(
+        "lifecycle.graceful_disconnect",
+        "client-initiated disconnect after completion",
+        "client closed the confirmed READY session voluntarily",
+    )
+
+
 async def _run_server(
     config: PairConfig,
     local: dict[str, object],
@@ -340,17 +548,41 @@ async def _run_server(
     session_id = evidence.session_id
     metadata_confirmed = asyncio.Event()
     client_send_seen = asyncio.Event()
-    complete = asyncio.Event()
-    connection_ids: set[int] = set()
-    session_objects: set[int] = set()
+    completion_request_done = asyncio.Event()
+    completion_confirmation_done = asyncio.Event()
+    remote_disconnected = asyncio.Event()
+    completion_failure = asyncio.Event()
+    completion_errors: list[BaseException] = []
+    completion_state = ServerCompletionState(session_id)
+    connections: list[Any] = []
+    session_objects: list[ProtocolSession] = []
+    final_connection_id: str | None = None
     echo_count = 0
     payload_verified = False
+
+    def fail_completion(
+        check_id: str,
+        description: str,
+        stage: str,
+        error: BaseException,
+    ) -> None:
+        failure = _record_completion_failure(
+            recorder,
+            check_id,
+            description,
+            stage,
+            error,
+        )
+        if not completion_failure.is_set():
+            completion_errors.append(failure)
+            completion_failure.set()
 
     def connection_for(message: Message) -> Any:
         connection = node.connection_for_peer(message.sender or "")
         if connection is None:
             raise AssertionError("server cannot inspect the inbound READY connection")
-        connection_ids.add(id(connection))
+        if all(existing is not connection for existing in connections):
+            connections.append(connection)
         return connection
 
     @node.on_message("compat.metadata.c2s")
@@ -358,7 +590,7 @@ async def _run_server(
         remote = validate_metadata(message.payload, allow_missing_session=True)
         evidence.remote = remote
         connection = connection_for(message)
-        session_objects.add(
+        session_objects.append(
             _inspect_ready(node, connection, config.remote_peer_id, recorder)
         )
         await node.reply(
@@ -426,9 +658,11 @@ async def _run_server(
 
     @node.on_message("compat.reconnect")
     async def verify_reconnect(message: Message) -> None:
+        nonlocal final_connection_id
         validate_session_payload(message.payload, session_id)
         connection = connection_for(message)
-        session_objects.add(
+        final_connection_id = f"{id(connection):x}"
+        session_objects.append(
             _inspect_ready(
                 node,
                 connection,
@@ -450,22 +684,97 @@ async def _run_server(
 
     @node.on_message("compat.complete")
     async def finish(message: Message) -> None:
-        validate_session_payload(message.payload, session_id)
-        connection_for(message)
-        if echo_count != CONCURRENT_REQUESTS:
-            raise AssertionError("server did not receive every concurrent request")
-        if not payload_verified:
-            raise AssertionError("server did not verify the reasonable-size payload")
-        if len(connection_ids) < 2 or len(session_objects) < 2:
-            raise AssertionError("server did not observe a fresh connection and session")
-        await node.reply(
-            message,
-            session_payload(session_id, server_status="PASS"),
-            type="compat.complete.reply",
+        description = "pair completion request/reply"
+        try:
+            completion_state.accept_request(message.payload)
+            connection = connection_for(message)
+            if final_connection_id != f"{id(connection):x}":
+                raise PairProtocolError(
+                    "completion request did not use the post-reconnect session"
+                )
+            if echo_count != CONCURRENT_REQUESTS:
+                raise AssertionError("server did not receive every concurrent request")
+            if not payload_verified:
+                raise AssertionError("server did not verify the reasonable-size payload")
+            if len(connections) < 2 or len(session_objects) < 2:
+                raise AssertionError(
+                    "server did not observe a fresh connection and session"
+                )
+            await node.reply(
+                message,
+                completion_payload(
+                    session_id,
+                    COMPLETION_REPLY,
+                    server_status="PASS",
+                ),
+                type="compat.complete.reply",
+                require_ack=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - completion/report boundary
+            fail_completion(
+                "protocol.completion_request",
+                description,
+                "completion request",
+                exc,
+            )
+            return
+        recorder.passed(
+            "protocol.completion_request",
+            description,
+            "server replied and received the technical ACK for compat.complete.reply",
         )
-        complete.set()
+        completion_request_done.set()
+
+    @node.on_message("compat.complete.confirmed")
+    async def confirm_completion(message: Message) -> None:
+        description = "pair completion confirmation request/reply"
+        try:
+            if not completion_request_done.is_set():
+                raise PairProtocolError(
+                    "completion confirmation arrived before the first reply completed"
+                )
+            completion_state.accept_confirmation(message.payload)
+            connection = connection_for(message)
+            if final_connection_id != f"{id(connection):x}":
+                raise PairProtocolError(
+                    "completion confirmation did not use the post-reconnect session"
+                )
+            await node.reply(
+                message,
+                completion_payload(
+                    session_id,
+                    COMPLETION_CONFIRMATION_REPLY,
+                    server_status="PASS",
+                ),
+                type="compat.complete.confirmed.reply",
+                require_ack=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - completion/report boundary
+            fail_completion(
+                "protocol.completion_confirmation",
+                description,
+                "completion confirmation",
+                exc,
+            )
+            return
+        recorder.passed(
+            "protocol.completion_confirmation",
+            description,
+            "server replied and received the technical ACK for the confirmation reply",
+        )
+        completion_confirmation_done.set()
+
+    @node.on_event(NodeEventType.DISCONNECTED)
+    def observe_remote_disconnect(event: NodeEvent) -> None:
+        if (
+            event.peer_id == config.remote_peer_id
+            and final_connection_id is not None
+            and event.connection_id == final_connection_id
+        ):
+            remote_disconnected.set()
 
     await _start_node(node, config)
+    print("Server node started; waiting for peer.", flush=True)
     remote_target: DiscoveredPeer | Peer | None = None
     try:
         if config.scenario == "discovery":
@@ -508,7 +817,6 @@ async def _run_server(
         )
         recorder.passed("messaging.ack", "technical acknowledgements in both directions")
         await asyncio.wait_for(client_send_seen.wait(), timeout=config.operation_timeout)
-        await asyncio.wait_for(complete.wait(), timeout=config.timeout)
         recorder.passed(
             "messaging.multiple", "multiple ordered application messages"
         )
@@ -520,6 +828,47 @@ async def _run_server(
         )
         recorder.passed("lifecycle.disconnect", "controlled software disconnect")
         recorder.passed("lifecycle.reconnect", "fresh TCP reconnect")
+        await _wait_server_stage(
+            expected=completion_request_done,
+            failure=completion_failure,
+            failure_errors=completion_errors,
+            remote_disconnected=remote_disconnected,
+            timeout=config.operation_timeout,
+            recorder=recorder,
+            check_id="protocol.completion_request",
+            description="pair completion request/reply",
+            stage="completion request",
+        )
+        await _wait_server_stage(
+            expected=completion_confirmation_done,
+            failure=completion_failure,
+            failure_errors=completion_errors,
+            remote_disconnected=remote_disconnected,
+            timeout=config.operation_timeout,
+            recorder=recorder,
+            check_id="protocol.completion_confirmation",
+            description="pair completion confirmation request/reply",
+            stage="completion confirmation",
+        )
+        try:
+            await asyncio.wait_for(
+                remote_disconnected.wait(), timeout=config.operation_timeout
+            )
+        except TimeoutError as exc:
+            recorder.add(
+                "lifecycle.remote_graceful_disconnect",
+                "server observation of client graceful disconnect",
+                Status.FAIL,
+                "server timed out waiting for the confirmed client to disconnect",
+            )
+            raise CompletionWorkflowError(
+                "server did not observe the final client disconnect"
+            ) from exc
+        recorder.passed(
+            "lifecycle.remote_graceful_disconnect",
+            "server observation of client graceful disconnect",
+            "server observed the post-confirmation peer session close",
+        )
         if config.keep_alive:
             print("Pair complete; --keep-alive is active. Press Ctrl+C to stop.", flush=True)
             await asyncio.Event().wait()
@@ -538,9 +887,7 @@ async def _run_server(
             )
         raise
     finally:
-        await node.stop()
-    _assert_clean(node)
-    recorder.passed("lifecycle.cleanup", "final task/socket/correlation cleanup")
+        await _stop_and_record(node, recorder)
 
 
 async def _wait_client_event(
@@ -731,7 +1078,7 @@ async def _run_client(
             recorder,
             reconnect=True,
         )
-        if second_session == first_session:
+        if second_session is first_session:
             raise AssertionError("reconnect reused the old Paqto session object")
         recorder.passed("lifecycle.reconnect", "fresh TCP reconnect")
         reconnect_response = await node.request(
@@ -749,18 +1096,15 @@ async def _run_client(
             "lifecycle.messaging_after_reconnect",
             "request/reply after fresh reconnect",
         )
-        completion = await node.request(
+        await _run_client_completion(
+            node,
             target,
-            session_payload(session_id, complete=True),
-            type="compat.complete",
+            session_id,
+            recorder,
+            config.operation_timeout,
         )
-        completion_payload = validate_session_payload(completion.payload, session_id)
-        if completion_payload.get("server_status") != "PASS":
-            raise RemotePairFailure("server did not propagate a PASS result")
     finally:
-        await node.stop()
-    _assert_clean(node)
-    recorder.passed("lifecycle.cleanup", "final task/socket/correlation cleanup")
+        await _stop_and_record(node, recorder)
 
 
 def build_pair_report(
@@ -782,6 +1126,7 @@ def build_pair_report(
         "status": overall_status(results),
         "local": local,
         "remote": evidence.remote,
+        "compatibility_suite": local["compatibility_suite"],
         "tests": tests_payload(results),
         "capabilities": {
             result.id: {"status": result.status.value, "detail": result.detail}
@@ -833,12 +1178,13 @@ async def execute_pair(config: PairConfig) -> tuple[dict[str, object], list[Chec
             str(exc),
         )
     except Exception as exc:  # noqa: BLE001 - role/report isolation boundary
-        recorder.add(
-            "pair.execution",
-            "requested pair scenario",
-            Status.FAIL,
-            f"{type(exc).__name__}: {exc}",
-        )
+        if not recorder.has_failure:
+            recorder.add(
+                "pair.execution",
+                "requested pair scenario",
+                Status.FAIL,
+                f"{type(exc).__name__}: {exc}",
+            )
     duration_ms = (time.perf_counter() - started) * 1000
     return (
         build_pair_report(config, local, evidence, recorder.results, duration_ms),

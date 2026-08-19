@@ -27,6 +27,8 @@ from compatibility_tests.common.reporting import (
     overall_status,
     tests_payload,
 )
+from compatibility_tests.common.suite_info import collect_suite_info
+from compatibility_tests.pair.protocol import PAIR_PROTOCOL_VERSION
 
 PROFILES = ("ci", "full")
 
@@ -98,7 +100,7 @@ def build_report(
     *,
     package: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    """Build one schema-v2 solo report without personal machine metadata."""
+    """Build one versioned solo report without personal machine metadata."""
     platform_info = collect_platform_info()
     python_info = collect_python_info()
     package_info = package or collect_package_info()
@@ -141,6 +143,10 @@ def build_report(
         "python": python_info,
         "paqto": package_info,
         "paqto_version": package_info.get("version", "unknown"),
+        "compatibility_suite": collect_suite_info(
+            schema_version=SCHEMA_VERSION,
+            pair_protocol_version=PAIR_PROTOCOL_VERSION,
+        ),
         "capabilities": capabilities,
         "tests": tests_payload(results),
         "durations": {
