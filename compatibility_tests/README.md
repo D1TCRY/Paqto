@@ -193,11 +193,3 @@ automated pair scenario passed:
 The automated pair scenario's software disconnect/reconnect checks Paqto's
 mechanism but does not replace this physical radio/network test.
 
-## Relationship to `platform_conformance`
-
-The former implementation was moved here instead of copied. Its 14 local
-checks now live in `compatibility_tests/solo/checks.py`. The old
-`python -m platform_conformance` command and imports are thin compatibility
-shims delegating to this same implementation, so there are not two divergent
-conformance suites.
-

@@ -69,8 +69,6 @@ include = [
     "tests",
     "examples",
     "compatibility_tests",
-    "platform_conformance",
-    "tools",
 ]
 exclude = ["**/__pycache__", "build", "dist"]
 extraPaths = ["src"]

@@ -23,10 +23,6 @@ Solo execution:
 python compatibility_tests/run.py solo
 ~~~
 
-The original local checks were relocated rather than duplicated.
-python -m platform_conformance remains a thin compatibility alias to the same
-solo implementation.
-
 All checks are offline. They use loopback/local networking and bundled public
 test-only trust material, never public DNS, HTTP, cloud services, or the
 machine trust store.
@@ -105,9 +101,6 @@ multiple/concurrent messages, a reasonable payload, controlled disconnect, a
 fresh TCP/TLS/Paqto connection, messaging after reconnect, and cleanup.
 Discovery additionally requires each device to observe the other peer id and
 endpoint and uses the discovered endpoint for the session.
-
-The older tools/two_device_interop.py remains historical/general-purpose
-tooling, but permanent evidence should use compatibility_tests/run.py.
 
 ## Real Android execution and boundaries
 

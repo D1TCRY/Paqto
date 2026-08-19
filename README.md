@@ -39,9 +39,7 @@ python compatibility_tests/run.py solo
 ```
 
 Use the same entry point with `pair` on two real devices for cross-platform LAN
-interoperability evidence. The former `python -m platform_conformance` command
-remains a compatibility alias. See the
-[suite README](compatibility_tests/README.md) and
+interoperability evidence. See the [suite README](compatibility_tests/README.md) and
 [platform testing](docs/platform-testing.md) for report semantics, desktop CI,
 and real-device procedures.
 
@@ -116,7 +114,7 @@ Review the [security model](docs/security.md) and
 - [Public API overview](docs/api-overview.md)
 - [Production considerations](docs/production.md)
 - [Platform support and portability](docs/platform-support.md)
-- [Platform conformance and interoperability testing](docs/platform-testing.md)
+- [Compatibility and interoperability testing](docs/platform-testing.md)
 
 Historical engineering reports remain under `docs/development_logs/`; they
 record how the implementation evolved and are not the current API reference.
