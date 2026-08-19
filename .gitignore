@@ -24,7 +24,6 @@ MANIFEST
 htmlcov/
 .tox/
 .nox/
-.mypy_cache/
 .pyright/
 .ruff_cache/
 .hypothesis/

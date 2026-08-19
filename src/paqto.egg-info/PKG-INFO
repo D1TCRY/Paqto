@@ -24,7 +24,6 @@ Description-Content-Type: text/markdown
 License-File: LICENCE
 Provides-Extra: dev
 Requires-Dist: build>=1.2; extra == "dev"
-Requires-Dist: mypy>=1.10; extra == "dev"
 Requires-Dist: pyright>=1.1.411; extra == "dev"
 Requires-Dist: pytest>=8; extra == "dev"
 Requires-Dist: pytest-asyncio>=0.23; extra == "dev"
