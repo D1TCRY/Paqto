@@ -132,12 +132,16 @@ request/reply, ACKs, TCP, or TLS.
 ## Release and validation gaps
 
 The repository test suite exercises loopback behavior, malformed inputs,
-timeouts, concurrency, TLS, reconnect, queue pressure, and cleanup on the
-available Windows/Python 3.14 environment. A production claim still needs:
+timeouts, concurrency, TLS, reconnect, queue pressure, and cleanup. Physical
+Windows 11 / CPython 3.12.10 and Android aarch64 / CPython 3.12.11 evidence
+passed on 2026-08-19, including direct two-device operation in both role
+arrangements and two Windows-server/Android-client discovery runs. These
+reports are currently local artifacts ignored by Git, not a broad release
+matrix. A production claim still needs:
 
 - real CI on supported Python 3.10 through 3.14;
-- Linux, macOS, and Windows coverage;
-- multi-host LAN tests and realistic firewall/interface configurations;
+- Linux and macOS coverage plus broader Windows and Android versions;
+- retained release evidence and realistic firewall/interface configurations;
 - prolonged slow-network, load, fault-injection, and memory tests;
 - property/fuzz tests for framing, controls, discovery, and serializers;
 - formal Paqto v1 wire documentation and cross-language vectors if independent

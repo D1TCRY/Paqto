@@ -56,12 +56,17 @@ Paqto requires Python 3.10 or later.
 python -m pip install -e .
 ```
 
-For development and tests:
+For development, install the optional dependencies and run the checks manually:
 
 ```console
 python -m pip install -e ".[dev]"
+python -m ruff check src tests examples compatibility_tests
+python -m pyright
 python -m pytest
 ```
+
+These commands are not attached to `git push`; pushing only publishes the
+commits already present in the local branch.
 
 The offline compatibility suite is separate from the normal pytest suite and
 is not included in the runtime wheel:
@@ -71,11 +76,9 @@ python compatibility_tests/run.py solo
 ```
 
 Use the same entry point with `pair` on two real devices for cross-platform LAN
-interoperability evidence. The former `python -m platform_conformance` command
-remains a compatibility alias. See the
-[suite README](compatibility_tests/README.md) and
-[platform testing](docs/platform-testing.md) for report semantics, desktop CI,
-and real-device procedures.
+interoperability evidence. See the [suite README](compatibility_tests/README.md) and
+[platform testing](docs/platform-testing.md) for report semantics and
+real-device procedures.
 
 ## Minimal LAN example
 
@@ -112,8 +115,8 @@ detects that network interfaces or addresses changed while the node is running,
 `await node.network_changed()` rebuilds listeners, discovery, TLS connections,
 and Paqto sessions from fresh endpoint observations.
 
-See [`examples/lan_two_nodes.py`](examples/lan_two_nodes.py) for a complete
-runnable two-node example.
+See [Create two LAN nodes](docs/getting-started.md#create-two-lan-nodes) for a
+complete runnable example.
 
 ## Security status
 
@@ -148,7 +151,7 @@ Review the [security model](docs/security.md) and
 - [Public API overview](docs/api-overview.md)
 - [Production considerations](docs/production.md)
 - [Platform support and portability](docs/platform-support.md)
-- [Platform conformance and interoperability testing](docs/platform-testing.md)
+- [Compatibility and interoperability testing](docs/platform-testing.md)
 
 Historical engineering reports remain under `docs/development_logs/`; they
 record how the implementation evolved and are not the current API reference.
