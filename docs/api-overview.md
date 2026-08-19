@@ -75,6 +75,20 @@ use their `PaqtoNode` wrappers.
 `MessageHandler` and `EventHandler` are public callable type aliases for sync
 or async callbacks.
 
+## Serializer API
+
+Import ready-to-use serializers from `paqto.serializers`:
+
+| Component | Use it for |
+| --- | --- |
+| `JsonSerializer` | Complete envelopes with portable JSON-safe payloads and configurable nesting, collection, and string limits. |
+| `BytesSerializer` | Complete envelopes whose payload is exactly `bytes`, encoded as canonical Base64. |
+| `JSON_PROTOCOL_ID`, `BYTES_PROTOCOL_ID` | Stable built-in wire-format identifiers used during handshake negotiation. |
+
+Serializer selection remains explicit in `PaqtoNode`. Custom implementations
+can continue to subclass the top-level `Serializer` contract. See
+[Built-in serializers](serializers.md) for format and safety details.
+
 ## LAN API
 
 Import the built-in adapters from `paqto.lan`:

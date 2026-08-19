@@ -16,7 +16,7 @@ interpret the payload or define what application success means.
 | `recipient: str \| None` | `None` | Logical destination; incoming non-null values must match the local peer. |
 | `headers: dict[str, str]` | empty | Generic string-to-string metadata. |
 | `id: str` | random UUID hex | Unique correlation identifier; must be non-empty. |
-| `created_at: datetime` | current UTC time | Local construction time. The example serializer does not transmit it. |
+| `created_at: datetime` | current UTC time | Local construction time. Built-in serializers preserve it as an ISO 8601 value. |
 | `reply_to: str \| None` | `None` | Request id answered by this message. |
 
 The serializer owns the entire wire representation. Paqto requires

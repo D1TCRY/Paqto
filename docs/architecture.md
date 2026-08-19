@@ -22,8 +22,8 @@ flowchart TB
 This direction prevents TCP, UDP, TLS, or application terminology from leaking
 into the generic message and routing APIs. A different medium can implement
 `Transport`, `Connection`, and `Listener`; a different discovery mechanism can
-implement `DiscoveryService`; applications choose their own serializer and
-message semantics.
+implement `DiscoveryService`; applications explicitly choose a built-in or
+custom serializer and retain ownership of message semantics.
 
 ## Core roles
 

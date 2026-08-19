@@ -51,6 +51,8 @@ needed:
   and operational trade-offs for every runtime option.
 - [Messaging](messaging.md) — envelopes, handlers, sending, request/reply,
   correlation cleanup, and technical ACKs.
+- [Serializers](serializers.md) — built-in JSON and bytes formats, payload
+  limits, wire identifiers, and custom implementations.
 - [Protocol](protocol.md) — hello exchange, identity consistency,
   capabilities, control frames, and message-size negotiation.
 - [Discovery](discovery.md) — UDP broadcast, cache freshness, reachability, and

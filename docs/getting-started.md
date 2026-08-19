@@ -9,60 +9,23 @@ Paqto applications assemble a node from four pieces:
 
 The built-in LAN adapters are `LanTransport` and `LanDiscovery`.
 
-## Implement a serializer
+## Choose a serializer
 
-Paqto intentionally has no default application serializer. A serializer must
-preserve the complete envelope, especially `id` and `reply_to` for
-request/reply and ACK correlation.
+Serializer selection is explicit because it defines the application wire
+format. Paqto includes two dependency-free implementations:
 
 ```python
-import json
-from datetime import datetime
-from typing import Any
-
-from paqto import Message, Serializer
-
-
-class JsonSerializer(Serializer):
-    @property
-    def protocol_id(self) -> str:
-        return "example/message-json-v1"
-
-    def serialize(self, message: Message) -> bytes:
-        return json.dumps(
-            {
-                "payload": message.payload,
-                "type": message.type,
-                "sender": message.sender,
-                "recipient": message.recipient,
-                "headers": message.headers,
-                "id": message.id,
-                "created_at": message.created_at.isoformat(),
-                "reply_to": message.reply_to,
-            },
-            separators=(",", ":"),
-        ).encode("utf-8")
-
-    def deserialize(self, data: bytes) -> Message:
-        raw: dict[str, Any] = json.loads(data.decode("utf-8"))
-        return Message(
-            payload=raw["payload"],
-            type=raw["type"],
-            sender=raw["sender"],
-            recipient=raw["recipient"],
-            headers=raw["headers"],
-            id=raw["id"],
-            created_at=datetime.fromisoformat(raw["created_at"]),
-            reply_to=raw["reply_to"],
-        )
+from paqto.serializers import BytesSerializer, JsonSerializer
 ```
 
-The explicit `protocol_id` gives different processes and implementations a
-stable wire identifier. Without the override, `Serializer.protocol_id` is
-derived from the Python module and qualified class name.
+`JsonSerializer` handles portable JSON values. `BytesSerializer` handles exact
+`bytes` payloads using canonical Base64 inside the envelope. Applications with
+different schema, performance, or interoperability requirements can still
+implement the public `Serializer` contract.
 
-Only deserialize formats that are safe for untrusted input. Paqto does not
-sandbox serializer code or constrain the size of the resulting Python object.
+Both peers must use the same format and advertise the same stable
+`protocol_id`. See [Built-in serializers](serializers.md) for supported payloads,
+resource limits, safety guarantees, and custom implementations.
 
 ## Create two LAN nodes
 
@@ -71,6 +34,7 @@ import asyncio
 
 from paqto import Message, PaqtoConfig, PaqtoNode
 from paqto.lan import LanDiscovery, LanTransport
+from paqto.serializers import JsonSerializer
 
 
 async def main() -> None:
@@ -78,7 +42,6 @@ async def main() -> None:
         connect_timeout=5,
         send_timeout=5,
         discover_timeout=2,
-        serializer_id="example/message-json-v1",
     )
     node_a = PaqtoNode(
         name="device-a",

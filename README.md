@@ -50,13 +50,14 @@ real-device procedures.
 
 ## Minimal LAN example
 
-Applications provide a `Serializer` for the complete `Message` envelope. This
-excerpt assumes `JsonSerializer` is implemented as shown in the
-[getting-started guide](docs/getting-started.md#implement-a-serializer).
+Applications explicitly select a `Serializer` for the complete `Message`
+envelope. Paqto includes dependency-free JSON and bytes implementations while
+retaining the public custom serializer contract.
 
 ```python
 from paqto import Message, PaqtoNode
 from paqto.lan import LanDiscovery, LanTransport
+from paqto.serializers import JsonSerializer
 
 node = PaqtoNode(
     name="device-a",
@@ -107,6 +108,7 @@ Review the [security model](docs/security.md) and
 
 - [Documentation home](docs/index.md)
 - [Getting started](docs/getting-started.md)
+- [Built-in and custom serializers](docs/serializers.md)
 - [Architecture and lifecycle](docs/architecture.md)
 - [Configuration reference](docs/configuration.md)
 - [Messaging, request/reply, and ACKs](docs/messaging.md)
