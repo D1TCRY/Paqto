@@ -11,7 +11,8 @@ The complete operator guide is
 ## Permanent offline suite
 
 The suite lives under top-level compatibility_tests/, outside src/, and is not
-included in the runtime wheel. Its single main entry point is:
+included in the runtime wheel. It is the repository's only compatibility
+suite, and its single main entry point is:
 
 ~~~console
 python compatibility_tests/run.py --help
@@ -60,7 +61,8 @@ A platform/version may be marked tested only when:
 1. the unchanged full profile exits 0 on the real target runtime;
 2. its JSON is retained with the code revision/release evidence;
 3. every claimed capability is PASS, never inferred from another capability;
-4. ordinary tests/static checks also pass where the toolchain is available.
+4. ordinary tests and static checks also pass where the development
+   dependencies are available.
 
 The report distinguishes Android from Linux using standard runtime indicators,
 including sys.getandroidapilevel() where exposed. This detection exists only in
@@ -115,3 +117,19 @@ Local broadcast is not cross-device broadcast. Automated software disconnect
 does not prove Wi-Fi OFF/ON, interface changes, suspend/resume, firewalls, AP
 isolation, or background policy. Follow the manual network-failure procedure in
 the suite README and retain it separately; never mark it automatically PASS.
+
+## Development checks
+
+The compatibility suite is separate from the normal development checks. After
+installing the `dev` dependencies, run these commands manually from the
+repository root:
+
+~~~console
+python -m ruff check src tests examples compatibility_tests
+python -m pyright
+python -m pytest
+~~~
+
+Ruff checks lint rules, Pyright checks types using `pyproject.toml`, and Pytest
+runs the unit and integration suite. The repository does not attach these
+commands to `git push`.

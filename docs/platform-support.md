@@ -6,34 +6,34 @@ model, signal API, or filesystem layout. Platform support is defined by
 capabilities supplied by Python, an adapter, and the host application rather
 than by platform-named classes.
 
-The current portability verdict is conditional but now evidence-based. The
-full offline conformance profile passes on the available Windows 11 / CPython
-3.14.6 host, including local IPv4 broadcast, TLS, and mTLS. A desktop CI matrix
-is configured, but Linux, macOS, other Python versions, mobile/sandbox
-behavior, and real multi-interface networks remain unverified until those jobs
-or devices actually produce passing reports.
+The compatibility suite has been exercised locally on Windows 11 / CPython
+3.14.6, but no machine-readable report is currently retained with the
+repository. Under the evidence rules below, no platform is therefore marked
+**SUPPORTED & TESTED**. The repository does not configure a hosted CI matrix.
+Linux, macOS, other Python versions, mobile/sandbox behavior, and real
+multi-interface networks remain unverified until the compatibility suite is
+run on those runtimes or devices and its reports are retained.
 
 ## Official support matrix
 
 Status terms are strict: **SUPPORTED & TESTED** requires a retained successful
-full conformance report from that real platform/version; **EXPECTED** is an
-architectural or configured-CI expectation without completed evidence;
-**UNVERIFIED** has no qualifying real-runtime result; **UNSUPPORTED** is outside
-the declared contract.
+full compatibility report from that real platform/version; **EXPECTED** is an
+architectural expectation without completed evidence; **UNVERIFIED** has no
+qualifying real-runtime result; **UNSUPPORTED** is outside the declared
+contract.
 
 | Platform | Status | Python versions | TCP | UDP discovery | TLS | Last tested |
 | --- | --- | --- | --- | --- | --- | --- |
-| Windows 11 (available host) | SUPPORTED & TESTED | 3.14.6 | PASS | PASS (local broadcast) | PASS (TLS/mTLS) | 2026-08-18 |
-| Windows hosted CI matrix | EXPECTED | 3.10, 3.12, 3.14 | Awaiting CI | Awaiting real broadcast; CI subset skips it | Awaiting CI | Not yet executed in this workspace |
-| Linux hosted CI matrix | EXPECTED | 3.10, 3.12, 3.14 | Awaiting CI | Awaiting real broadcast; CI subset skips it | Awaiting CI | Not yet executed in this workspace |
-| macOS hosted CI matrix | EXPECTED | 3.10, 3.12, 3.14 | Awaiting CI | Awaiting real broadcast; CI subset skips it | Awaiting CI | Not yet executed in this workspace |
-| Android device/emulator with supported Python | EXPECTED / AWAITING DEVICE VALIDATION | 3.10+ runtime-dependent | Awaiting real execution | Awaiting real execution | Awaiting real execution | No Android execution performed |
+| Windows 11 (available host) | UNVERIFIED | 3.14.6 observed locally | Report not retained | Report not retained | Report not retained | No retained report |
+| Linux runtime | UNVERIFIED | 3.10+ runtime-dependent | Not run | Not run | Not run | No retained report |
+| macOS runtime | UNVERIFIED | 3.10+ runtime-dependent | Not run | Not run | Not run | No retained report |
+| Android device/emulator with supported Python | UNVERIFIED | 3.10+ runtime-dependent | Not run | Not run | Not run | No retained report |
 
-The Windows result applies only to the exact runtime and capabilities shown;
-it does not prove every Windows release, Python version, network driver, or
-firewall policy. The certification rules, JSON format, exit codes, Android
-procedure, and two-device exercise are documented in
-[Platform testing](platform-testing.md).
+The previous Windows observation applies only to that runtime and cannot be
+used as retained certification evidence. It does not prove every Windows
+release, Python version, network driver, or firewall policy. The certification
+rules, JSON format, exit codes, Android procedure, and two-device exercise are
+documented in [Platform testing](platform-testing.md).
 
 ## Portability contract
 
@@ -218,9 +218,10 @@ paths under the tested runtime, not all entries in this real-environment matrix.
 
 ## Current limitations and roadmap
 
-Near-term portability work should execute and retain results from the configured
-desktop CI, then run the same full conformance suite on a real Android runtime
-and add opt-in live tests for offline LAN, IPv6, multi-interface selection, and
-TLS stores. Subsequent API work may add plural advertised endpoints, explicit
-context-reload coordination, and alternative discovery adapters. Those changes should remain
-capability-based; they should not introduce operating-system-named core types.
+Near-term portability work should run and retain compatibility reports from
+real Windows, Linux, and macOS runtimes, then run the same full compatibility
+suite on a real Android runtime and add opt-in live tests for offline LAN,
+IPv6, multi-interface selection, and TLS stores. Subsequent API work may add
+plural advertised endpoints, explicit context-reload coordination, and
+alternative discovery adapters. Those changes should remain capability-based;
+they should not introduce operating-system-named core types.

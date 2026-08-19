@@ -68,8 +68,8 @@ needed:
   current independent-audit findings.
 - [Platform support](platform-support.md) — portability contract, host
   capabilities, optional features, and real-runtime validation gaps.
-- [Platform testing](platform-testing.md) — offline conformance profiles,
-  machine-readable reports, desktop CI, real-device execution, and two-device
+- [Compatibility testing](platform-testing.md) — the offline solo/pair suite,
+  machine-readable reports, real-device execution, and two-device
   interoperability.
 
 The files under `development_logs/` are chronological engineering records.

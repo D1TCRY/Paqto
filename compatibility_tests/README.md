@@ -4,7 +4,8 @@
 about the exact operating system, Python runtime, Paqto import, and network
 capabilities that were actually exercised. It is outside `src/`, is not part
 of the Paqto runtime API, and is excluded from wheels by the Setuptools package
-discovery rule (`src/paqto*` only).
+discovery rule (`src/paqto*` only). It is the only compatibility-suite
+implementation in the repository.
 
 The only main entry point is:
 
