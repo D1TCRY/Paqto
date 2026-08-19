@@ -16,6 +16,8 @@ wheels/
 *.egg
 *.whl
 MANIFEST
+build.bat
+publish.bat
 
 # Test, coverage, and static-analysis caches
 .pytest_cache/
