@@ -62,6 +62,7 @@ from paqto.core import (
     Transport,
     TransportError,
 )
+from paqto.serializers import BytesSerializer, JsonSerializer
 
 __all__ = [
     "HEARTBEAT_CAPABILITY",
@@ -73,6 +74,7 @@ __all__ = [
     "AcknowledgementUnavailableError",
     "AlreadyStartedError",
     "BackpressurePolicy",
+    "BytesSerializer",
     "Connection",
     "ConnectionClosedError",
     "ConnectionIdleTimeoutError",
@@ -88,6 +90,7 @@ __all__ = [
     "HandshakeOffer",
     "HeartbeatPing",
     "HeartbeatPong",
+    "JsonSerializer",
     "Listener",
     "Message",
     "MessageHandler",
