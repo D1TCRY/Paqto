@@ -20,6 +20,7 @@ build.bat
 publish.bat
 
 # Test, coverage, and static-analysis caches
+tests/tmp/
 .pytest_cache/
 .coverage
 .coverage.*
